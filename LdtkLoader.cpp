@@ -1,4 +1,4 @@
-#include "LdtkLoader.h"
+﻿#include "LdtkLoader.h"
 
 #include <cctype>
 #include <cmath>
@@ -12,8 +12,19 @@
 #include <string_view>
 #include <utility>
 
+//========================================
+// LdtkLoader 実装
+//========================================
+// LDtk の JSON を自前で読み取り、学習側が使うレベル情報へ変換します。
+// 前半は簡易 JSON パーサ、後半は LDtk 専用の解釈処理です。
+
 namespace {
 
+//========================================
+// JSON 基本型
+//========================================
+
+/* JSON の値種別 */
 enum class JsonType {
     Null,
     Bool,
@@ -23,6 +34,8 @@ enum class JsonType {
     Object,
 };
 
+/* JSON 値保持体 */
+// 配列・オブジェクト・文字列などを 1 つの型で持てるようにしています。
 struct JsonValue {
     JsonType type = JsonType::Null;
     bool boolValue = false;
@@ -31,6 +44,7 @@ struct JsonValue {
     std::vector<JsonValue> arrayValue;
     std::map<std::string, JsonValue> objectValue;
 
+    /* オブジェクト内フィールド検索 */
     const JsonValue* Find(const std::string& key) const {
         if (type != JsonType::Object) {
             return nullptr;
@@ -44,12 +58,18 @@ struct JsonValue {
     }
 };
 
+//========================================
+// 文字列と数値の補助
+//========================================
+
+/* JSON パース失敗通知 */
 [[noreturn]] void ThrowJsonError(const std::string& message, std::size_t position) {
     std::ostringstream stream;
     stream << "LDtk JSON parse error at " << position << ": " << message;
     throw std::runtime_error(stream.str());
 }
 
+/* Unicode code point を UTF-8 化 */
 std::string EncodeUtf8(unsigned int codePoint) {
     std::string result;
 
@@ -72,6 +92,7 @@ std::string EncodeUtf8(unsigned int codePoint) {
     return result;
 }
 
+/* 16 進 1 文字変換 */
 int HexDigitToInt(char ch) {
     if (ch >= '0' && ch <= '9') {
         return ch - '0';
@@ -85,10 +106,16 @@ int HexDigitToInt(char ch) {
     return -1;
 }
 
+//========================================
+// JSON パーサ本体
+//========================================
+
 class JsonParser {
 public:
+    /* 入力全文を保持して構築 */
     explicit JsonParser(std::string text) : text_(std::move(text)) {}
 
+    /* JSON 全体を 1 個の値として読む */
     JsonValue Parse() {
         JsonValue value = ParseValue();
         SkipWhitespace();
@@ -100,6 +127,7 @@ public:
     }
 
 private:
+    /* 現在位置の値を判定して読む */
     JsonValue ParseValue() {
         SkipWhitespace();
         if (position_ >= text_.size()) {
@@ -128,6 +156,7 @@ private:
         }
     }
 
+    /* オブジェクト読み込み */
     JsonValue ParseObject() {
         JsonValue object;
         object.type = JsonType::Object;
@@ -161,6 +190,7 @@ private:
         return object;
     }
 
+    /* 配列読み込み */
     JsonValue ParseArray() {
         JsonValue array;
         array.type = JsonType::Array;
@@ -186,6 +216,7 @@ private:
         return array;
     }
 
+    /* 文字列値読み込み */
     JsonValue ParseStringValue() {
         JsonValue value;
         value.type = JsonType::String;
@@ -193,6 +224,7 @@ private:
         return value;
     }
 
+    /* クォート内部の文字列本体を読む */
     std::string ParseString() {
         Expect('"');
 
@@ -260,6 +292,7 @@ private:
         ThrowJsonError("unterminated string", position_);
     }
 
+    /* 数値読み込み */
     JsonValue ParseNumber() {
         const char* begin = text_.c_str() + position_;
         char* end = nullptr;
@@ -277,6 +310,7 @@ private:
         return number;
     }
 
+    /* true 読み込み */
     JsonValue ParseTrue() {
         ExpectWord("true");
 
@@ -286,6 +320,7 @@ private:
         return value;
     }
 
+    /* false 読み込み */
     JsonValue ParseFalse() {
         ExpectWord("false");
 
@@ -295,6 +330,7 @@ private:
         return value;
     }
 
+    /* null 読み込み */
     JsonValue ParseNull() {
         ExpectWord("null");
 
@@ -303,6 +339,7 @@ private:
         return value;
     }
 
+    /* 空白読み飛ばし */
     void SkipWhitespace() {
         while (position_ < text_.size() &&
                std::isspace(static_cast<unsigned char>(text_[position_]))) {
@@ -310,6 +347,7 @@ private:
         }
     }
 
+    /* 1 文字の必須トークン確認 */
     void Expect(char token) {
         if (position_ >= text_.size() || text_[position_] != token) {
             std::ostringstream stream;
@@ -319,6 +357,7 @@ private:
         ++position_;
     }
 
+    /* 予約語確認 */
     void ExpectWord(std::string_view word) {
         if (text_.compare(position_, word.size(), word) != 0) {
             ThrowJsonError("unexpected literal", position_);
@@ -326,6 +365,7 @@ private:
         position_ += word.size();
     }
 
+    /* 任意トークン消費 */
     bool TryConsume(char token) {
         if (position_ < text_.size() && text_[position_] == token) {
             ++position_;
@@ -338,6 +378,11 @@ private:
     std::size_t position_ = 0;
 };
 
+//========================================
+// JSON 型チェック補助
+//========================================
+
+/* 必須フィールド取得 */
 const JsonValue& RequireField(const JsonValue& object, const char* key) {
     const JsonValue* value = object.Find(key);
     if (value == nullptr) {
@@ -348,10 +393,12 @@ const JsonValue& RequireField(const JsonValue& object, const char* key) {
     return *value;
 }
 
+/* 任意フィールド取得 */
 const JsonValue* FindField(const JsonValue& object, const char* key) {
     return object.Find(key);
 }
 
+/* 配列として取り出す */
 const std::vector<JsonValue>& AsArray(const JsonValue& value, const char* label) {
     if (value.type != JsonType::Array) {
         std::ostringstream stream;
@@ -361,6 +408,7 @@ const std::vector<JsonValue>& AsArray(const JsonValue& value, const char* label)
     return value.arrayValue;
 }
 
+/* オブジェクトとして取り出す */
 const std::map<std::string, JsonValue>& AsObject(const JsonValue& value, const char* label) {
     if (value.type != JsonType::Object) {
         std::ostringstream stream;
@@ -370,6 +418,7 @@ const std::map<std::string, JsonValue>& AsObject(const JsonValue& value, const c
     return value.objectValue;
 }
 
+/* 文字列として取り出す */
 std::string AsString(const JsonValue& value, const char* label) {
     if (value.type != JsonType::String) {
         std::ostringstream stream;
@@ -379,6 +428,7 @@ std::string AsString(const JsonValue& value, const char* label) {
     return value.stringValue;
 }
 
+/* 整数として取り出す */
 int AsInt(const JsonValue& value, const char* label) {
     if (value.type != JsonType::Number) {
         std::ostringstream stream;
@@ -388,6 +438,11 @@ int AsInt(const JsonValue& value, const char* label) {
     return static_cast<int>(std::lround(value.numberValue));
 }
 
+//========================================
+// ファイル読み込み
+//========================================
+
+/* テキストファイル全読み込み */
 std::string ReadTextFile(const std::filesystem::path& filePath) {
     std::ifstream input(filePath, std::ios::binary);
     if (!input) {
@@ -410,6 +465,11 @@ std::string ReadTextFile(const std::filesystem::path& filePath) {
     return text;
 }
 
+//========================================
+// LDtk レイヤー変換
+//========================================
+
+/* IntGrid 配列抽出 */
 std::vector<int> ParseIntGridCsv(const JsonValue& layerValue) {
     std::vector<int> values;
 
@@ -427,6 +487,7 @@ std::vector<int> ParseIntGridCsv(const JsonValue& layerValue) {
     return values;
 }
 
+/* Entities 配列抽出 */
 std::vector<LdtkEntityData> ParseEntities(const JsonValue& layerValue, int gridSize) {
     std::vector<LdtkEntityData> entities;
 
@@ -467,12 +528,14 @@ std::vector<LdtkEntityData> ParseEntities(const JsonValue& layerValue, int gridS
     return entities;
 }
 
+/* レベル 1 件分の変換 */
 LdtkLevelData ParseLevel(const JsonValue& levelValue) {
     AsObject(levelValue, "level");
 
     LdtkLevelData level;
     level.identifier = AsString(RequireField(levelValue, "identifier"), "identifier");
 
+    /* LDtk の外部レベル分割はこの簡易ローダでは追わないので、同一ファイル内レベルだけ扱います。 */
     const JsonValue* layersValue = FindField(levelValue, "layerInstances");
     if (layersValue == nullptr || layersValue->type == JsonType::Null) {
         throw std::runtime_error("external level files are not supported in this demo");
@@ -481,6 +544,7 @@ LdtkLevelData ParseLevel(const JsonValue& levelValue) {
     const auto& layers = AsArray(*layersValue, "layerInstances");
     bool hasCollision = false;
 
+    /* 各レイヤーを見ながら、地形用 IntGrid と補助用 Entities を取り分けます。 */
     for (const JsonValue& layerValue : layers) {
         AsObject(layerValue, "layer");
 
@@ -490,6 +554,7 @@ LdtkLevelData ParseLevel(const JsonValue& levelValue) {
             AsString(RequireField(layerValue, "__identifier"), "__identifier");
 
         if (layerType == "IntGrid") {
+            /* 実際にマップ本体として使う IntGrid を採用し、サイズ情報もここで拾います。 */
             const std::vector<int> gridValues = ParseIntGridCsv(layerValue);
             if (gridValues.empty()) {
                 continue;
@@ -504,12 +569,14 @@ LdtkLevelData ParseLevel(const JsonValue& levelValue) {
             level.intGridCsv = gridValues;
             hasCollision = true;
         } else if (layerType == "Entities") {
+            /* Start / Goal などの個別エンティティは、別レイヤーから補助情報として集めます。 */
             const int gridSize =
                 AsInt(RequireField(layerValue, "__gridSize"), "__gridSize");
             level.entities = ParseEntities(layerValue, gridSize);
         }
     }
 
+    /* 学習デモとして最低限必要な地形サイズと IntGrid 本体がそろっているか確認します。 */
     if (!hasCollision) {
         throw std::runtime_error("IntGrid layer was not found");
     }
@@ -528,7 +595,13 @@ LdtkLevelData ParseLevel(const JsonValue& levelValue) {
 
 }  // namespace
 
+//========================================
+// 公開読み込み関数
+//========================================
+
+/* プロジェクト全体読み込み */
 LdtkProjectData LoadLdtkProject(const std::filesystem::path& filePath) {
+    /* まずファイル全体を読み込み、BOM 除去後の JSON テキストをパーサへ渡します。 */
     const std::string text = ReadTextFile(filePath);
     JsonParser parser(text);
     const JsonValue root = parser.Parse();
@@ -537,6 +610,7 @@ LdtkProjectData LoadLdtkProject(const std::filesystem::path& filePath) {
 
     const auto& levelArray = AsArray(RequireField(root, "levels"), "levels");
 
+    /* `levels` 配列を上から順に変換し、このデモで使いやすい構造体列へ積み直します。 */
     LdtkProjectData project;
     project.levels.reserve(levelArray.size());
     for (const JsonValue& levelValue : levelArray) {
