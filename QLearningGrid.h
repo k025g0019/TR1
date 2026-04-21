@@ -71,6 +71,12 @@ public:
     /* 現在エピソードでエージェントが立っている座標を返します。 */
     GridPoint GetAgent() const;
 
+    /* 現在エピソードで敵が立っている座標を返します。 */
+    GridPoint GetEnemy() const;
+
+    /* 現在エピソードで動いている全敵の座標列を返します。 */
+    const std::vector<GridPoint>& GetEnemies() const;
+
     /* 毎エピソードの開始位置として使う Start 座標を返します。 */
     GridPoint GetStart() const;
 
@@ -112,6 +118,9 @@ public:
     /* ゴール到達で終わった成功エピソード数を返します。 */
     int GetSuccessfulEpisodeCount() const;
 
+    /* ゴールを阻止した失敗エピソード数を返します。 */
+    int GetBlockedEpisodeCount() const;
+
     /* 進行中エピソードで現在何手進んでいるかを返します。 */
     int GetCurrentEpisodeSteps() const;
 
@@ -129,6 +138,9 @@ public:
 
     /* 直近ウィンドウに入っている成功フラグから成功率を計算して返します。 */
     float GetRecentSuccessRate() const;
+
+    /* 直近ウィンドウでゴール阻止になった割合を返します。 */
+    float GetRecentBlockedRate() const;
 
     /* CSV 出力や画面表示で使う履歴レコード列を参照用に返します。 */
     const std::vector<EpisodeRecord>& GetEpisodeHistory() const;
@@ -148,10 +160,10 @@ private:
     // 1 ステップ結果
     //========================================
 
-    struct StepResult {
+    struct MoveResult {
         GridPoint next;
-        float reward;
-        bool done;
+        bool blocked = false;
+        Tile landedTile = Tile::Empty;
     };
 
     //========================================
@@ -186,8 +198,38 @@ private:
     /* 落とし穴へ入ったときに与える負報酬で、危険マスを避けさせます。 */
     static constexpr float kPitPenalty = -8.0f;
 
+    /* 敵へ捕まったときに与える大きな負報酬で、接触回避を強く学ばせます。 */
+    static constexpr float kCaughtPenalty = -10.0f;
+
     /* 手数上限で打ち切られたエピソードへ、停滞分の追加減点を入れます。 */
     static constexpr float kTimeoutPenalty = -1.5f;
+
+    /* 敵が通常移動したときの小さな基本報酬で、長引く追跡を少しだけ抑えます。 */
+    static constexpr float kEnemyStepReward = -0.02f;
+
+    /* 敵が壁や盤外で足踏みしたときの減点です。 */
+    static constexpr float kEnemyWallPenalty = -0.30f;
+
+    /* 敵がプレイヤーを捕まえたときの大きな正報酬です。 */
+    static constexpr float kEnemyCatchReward = 10.0f;
+
+    /* プレイヤーにゴールへ逃げ切られたときの敵側ペナルティです。 */
+    static constexpr float kEnemyGoalPenalty = -10.0f;
+
+    /* プレイヤーが穴や時間切れで脱落したとき、敵にも阻止成功として与える報酬です。 */
+    static constexpr float kEnemyBlockReward = 3.0f;
+
+    /* 他の敵とは別の逃げ道を塞いだときに加点し、包囲を学ばせます。 */
+    static constexpr float kEnemySealEscapeReward = 0.60f;
+
+    /* プレイヤー隣接 4 方向を複数敵で押さえるほど加点し、囲い込みを促します。 */
+    static constexpr float kEnemyAdjacencyReward = 0.35f;
+
+    /* 敵が同じ側へ団子にならず、別方向へ散るほど少し加点して挟み込みを促します。 */
+    static constexpr float kEnemySpreadReward = 0.18f;
+
+    /* プレイヤー周囲 4 方向の被覆状態を表すビットマスクの総数です。 */
+    static constexpr int kEnemySupportMaskCount = 16;
 
     //========================================
     // 進行制限
@@ -203,11 +245,17 @@ private:
     // 内部処理
     //========================================
 
-    /* 2 次元座標を 1 次元配列の添字へ変換します。 */
-    int StateIndex(const GridPoint& point) const;
+    /* 2 次元座標を 1 次元セル添字へ変換します。 */
+    int CellIndex(const GridPoint& point) const;
+
+    /* プレイヤー位置と敵位置の組を、共同状態の添字へ変換します。 */
+    int JointStateIndex(const GridPoint& playerPoint, const GridPoint& enemyPoint) const;
 
     /* マスが盤面の外へはみ出していないかを判定します。 */
     bool IsInside(const GridPoint& point) const;
+
+    /* 敵が踏み込める通常マスかどうかを判定します。 */
+    bool IsEnemyWalkable(const GridPoint& point) const;
 
     /* 組み込みマップを再構築し、固定の開始位置と障害物を置き直します。 */
     void ResetMap();
@@ -226,8 +274,53 @@ private:
     /* Goal から逆向きに最短距離を張り、進捗報酬の基準になる距離表を作ります。 */
     void RebuildGoalDistanceMap();
 
+    /* Start から Goal への代表経路上から、敵の初期配置候補を組み立てます。 */
+    std::vector<GridPoint> ChooseDefaultEnemyStarts() const;
+
     /* そのマスから Goal までの最短距離を返します。到達不能なら -1 です。 */
     int GoalDistance(const GridPoint& point) const;
+
+    /* ある時点の敵一覧から、プレイヤーに最も近い代表脅威を 1 体選びます。 */
+    GridPoint SelectPrimaryEnemy(
+        const GridPoint& playerPoint,
+        const std::vector<GridPoint>& enemies) const;
+
+    /* 指定座標に他の敵が居るかを調べ、敵同士の重なりを防ぎます。 */
+    bool ContainsEnemy(
+        const std::vector<GridPoint>& enemies,
+        const GridPoint& point) const;
+
+    /* 敵専用の状態添字として、味方の逃げ道封鎖情報も含めた添字を返します。 */
+    int EnemyStateIndex(
+        const GridPoint& playerPoint,
+        const GridPoint& enemyPoint,
+        int supportMask) const;
+
+    /* 他の敵がプレイヤー周囲 4 方向のどこを既に押さえているかをビットで返します。 */
+    int BuildEnemySupportMask(
+        const GridPoint& playerPoint,
+        const std::vector<GridPoint>& enemies,
+        std::size_t ignoredEnemyIndex) const;
+
+    /* プレイヤーが今このターンに安全に逃げられる方向数を数えます。 */
+    int CountPlayerEscapeRoutes(
+        const GridPoint& playerPoint,
+        const std::vector<GridPoint>& enemies) const;
+
+    /* プレイヤー隣接 4 マスのうち、敵が実際に押さえている方向数を数えます。 */
+    int CountAdjacentEnemyCoverage(
+        const GridPoint& playerPoint,
+        const std::vector<GridPoint>& enemies) const;
+
+    /* 敵 1 体がプレイヤーのどちら側から圧力をかけているかを 0..3 で返します。 */
+    int EnemyApproachDirection(
+        const GridPoint& playerPoint,
+        const GridPoint& enemyPoint) const;
+
+    /* 敵群が何方向からプレイヤーへ圧力をかけているかを数えます。 */
+    int CountEnemyApproachDirections(
+        const GridPoint& playerPoint,
+        const std::vector<GridPoint>& enemies) const;
 
     /* 現在のマップサイズに応じて、1 エピソードの手数上限を動的に決めます。 */
     int EpisodeStepLimit() const;
@@ -238,20 +331,38 @@ private:
     /* 経路未発見の間は探索を止めすぎないよう、状況に応じた探索率下限を返します。 */
     float MinimumExplorationRate() const;
 
-    /* そのマスで取りうる 4 行動のうち、最大 Q 値だけを抜き出します。 */
-    float MaxQ(const GridPoint& point) const;
+    /* 状態添字 1 つぶんの 4 行動から、指定テーブルの最大 Q 値だけを返します。 */
+    float MaxQ(const std::vector<float>& qTable, int stateIndex) const;
 
     /* 探索用に 4 方向から完全ランダムで 1 手を選びます。 */
     Action RandomAction();
 
+    /* 指定テーブルを deterministic に読み、状態添字で最も高い行動を 1 つ返します。 */
+    Action GetBestActionForState(
+        const std::vector<float>& qTable,
+        int stateIndex) const;
+
     /* 最大 Q 値の行動だけを候補に残し、同点ならランダムで 1 つ選びます。 */
-    Action SelectGreedyAction(const GridPoint& point);
+    Action SelectGreedyAction(
+        const std::vector<float>& qTable,
+        int stateIndex);
 
     /* epsilon-greedy に従い、探索手か活用手かを切り替えて 1 手を選びます。 */
-    Action SelectAction(const GridPoint& point);
+    Action SelectAction(
+        const std::vector<float>& qTable,
+        int stateIndex);
 
-    /* 指定行動を仮想的に 1 手だけ進め、次座標・報酬・終了判定を組み立てます。 */
-    StepResult Simulate(const GridPoint& point, Action action) const;
+    /* 指定行動を 1 手ぶんだけ盤面上へ適用し、壁判定込みの次座標を返します。 */
+    MoveResult SimulateMove(const GridPoint& point, Action action, bool avoidPit) const;
+
+    /* 敵専用の移動判定として、壁や落とし穴に加えて他の敵との重なりも避けます。 */
+    MoveResult SimulateEnemyMove(
+        const GridPoint& point,
+        Action action,
+        const std::vector<GridPoint>& occupiedEnemies) const;
+
+    /* プレイヤーが Goal へ近づいた度合いを、最短距離差から報酬へ変換します。 */
+    float PlayerProgressReward(const GridPoint& from, const GridPoint& to) const;
 
     /* 1 手ぶんの行動選択、Q 更新、終了判定をまとめて進めます。 */
     void Step();
@@ -275,8 +386,11 @@ private:
     /* 現在マップの各マス種別を 1 次元配列で保持します。 */
     std::vector<Tile> tiles_;
 
-    /* 各マス × 各行動の Q 値本体です。学習はここを書き換えて進みます。 */
-    std::vector<float> q_;
+    /* プレイヤー位置 × 敵位置 × 行動の Q 値本体です。 */
+    std::vector<float> playerQ_;
+
+    /* 敵位置 × プレイヤー位置 × 味方被覆マスク × 行動の Q 値本体です。 */
+    std::vector<float> enemyQ_;
 
     /* 各マスから Goal までの最短距離で、進捗報酬の地図として使います。 */
     std::vector<int> goalDistance_;
@@ -294,11 +408,17 @@ private:
     /* 毎エピソードの開始位置です。ResetEpisode でここへ戻します。 */
     GridPoint start_ = {};
 
+    /* 毎エピソードの敵開始位置列です。マップから読むか、自動配置で決めます。 */
+    std::vector<GridPoint> enemyStarts_;
+
     /* 目標マスです。距離報酬や終了判定の基準として使います。 */
     GridPoint goal_ = {};
 
     /* 現在エピソードでエージェントが立っている座標です。 */
     GridPoint agent_ = {};
+
+    /* 現在エピソードで敵が立っている座標列です。 */
+    std::vector<GridPoint> enemies_;
 
     //========================================
     // 乱数と探索制御

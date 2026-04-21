@@ -63,6 +63,11 @@ bool IsWallIdentifier(const std::string& identifier) {
     return identifier == "Wall";
 }
 
+/* Enemy 識別子判定 */
+bool IsEnemyIdentifier(const std::string& identifier) {
+    return identifier == "Enemy" || identifier == "EnemyStart";
+}
+
 }  // namespace
 
 //========================================
@@ -162,11 +167,22 @@ void QLearningGrid::Train(int steps) {
 //========================================
 
 Tile QLearningGrid::GetTile(int x, int y) const {
-    return tiles_[StateIndex({x, y})];
+    return tiles_[CellIndex({x, y})];
 }
 
 GridPoint QLearningGrid::GetAgent() const {
     return agent_;
+}
+
+GridPoint QLearningGrid::GetEnemy() const {
+    if (enemies_.empty()) {
+        return start_;
+    }
+    return SelectPrimaryEnemy(agent_, enemies_);
+}
+
+const std::vector<GridPoint>& QLearningGrid::GetEnemies() const {
+    return enemies_;
 }
 
 GridPoint QLearningGrid::GetStart() const {
@@ -206,31 +222,19 @@ int QLearningGrid::GetGridHeight() const {
 }
 
 float QLearningGrid::GetQValue(int x, int y, Action action) const {
-    const int state = StateIndex({x, y});
-    return q_[state * kActionCount + static_cast<int>(action)];
+    const GridPoint primaryEnemy = SelectPrimaryEnemy({x, y}, enemies_);
+    const int state = JointStateIndex({x, y}, primaryEnemy);
+    return playerQ_[state * kActionCount + static_cast<int>(action)];
 }
 
 float QLearningGrid::GetBestValue(int x, int y) const {
-    return MaxQ({x, y});
+    const GridPoint primaryEnemy = SelectPrimaryEnemy({x, y}, enemies_);
+    return MaxQ(playerQ_, JointStateIndex({x, y}, primaryEnemy));
 }
 
 Action QLearningGrid::GetBestAction(int x, int y) const {
-    const int state = StateIndex({x, y});
-    float bestValue = std::numeric_limits<float>::lowest();
-    Action bestAction = Action::Up;
-
-    /* 4 方向を順番に見ていき、その時点で一番良い方向を保持し続けます。 */
-    for (int actionIndex = 0; actionIndex < kActionCount; ++actionIndex) {
-        const float qValue = q_[state * kActionCount + actionIndex];
-
-        /* 今見ている方向の評価が暫定 1 位を上回ったら、その方向へ更新します。 */
-        if (qValue > bestValue) {
-            bestValue = qValue;
-            bestAction = static_cast<Action>(actionIndex);
-        }
-    }
-
-    return bestAction;
+    const GridPoint primaryEnemy = SelectPrimaryEnemy({x, y}, enemies_);
+    return GetBestActionForState(playerQ_, JointStateIndex({x, y}, primaryEnemy));
 }
 
 int QLearningGrid::GetEpisodeCount() const {
@@ -239,6 +243,10 @@ int QLearningGrid::GetEpisodeCount() const {
 
 int QLearningGrid::GetSuccessfulEpisodeCount() const {
     return successfulEpisodeCount_;
+}
+
+int QLearningGrid::GetBlockedEpisodeCount() const {
+    return episodeCount_ - successfulEpisodeCount_;
 }
 
 int QLearningGrid::GetCurrentEpisodeSteps() const {
@@ -285,6 +293,10 @@ float QLearningGrid::GetRecentSuccessRate() const {
     return total / static_cast<float>(rewardWindowCount_);
 }
 
+float QLearningGrid::GetRecentBlockedRate() const {
+    return 1.0f - GetRecentSuccessRate();
+}
+
 const std::vector<QLearningGrid::EpisodeRecord>& QLearningGrid::GetEpisodeHistory() const {
     return episodeHistory_;
 }
@@ -307,49 +319,105 @@ int QLearningGrid::MeasureGreedyPathLength() const {
 
 std::vector<GridPoint> QLearningGrid::BuildGreedyPath(int maxSteps) const {
     if (maxSteps <= 0) {
-        maxSteps = std::max(1, gridWidth_ * gridHeight_);
+        maxSteps = std::max(1, gridWidth_ * gridHeight_ * 2);
     }
 
     std::vector<GridPoint> path;
     path.reserve(static_cast<std::size_t>(maxSteps) + 1);
 
-    /* Start から始めて、毎手「今いちばん良い行動」だけを仮想的に追いかけます。 */
+    /* Start と敵開始位置列から始めて、プレイヤーと全敵の greedy 行動だけを仮想的に追いかけます。 */
 
-    /* 同じマスへ戻り続ける無限ループを止めるため、訪問済みマスを記録します。 */
-    std::vector<unsigned char> visited(static_cast<std::size_t>(gridWidth_ * gridHeight_), 0);
-    GridPoint position = start_;
-    path.push_back(position);
+    /* 同じ共同状態へ戻り続ける無限ループを止めるため、訪問済み状態を記録します。 */
+    const int cellCount = gridWidth_ * gridHeight_;
+    std::vector<unsigned char> visited(
+        static_cast<std::size_t>(cellCount * cellCount * kEnemySupportMaskCount),
+        0);
+    GridPoint player = start_;
+    std::vector<GridPoint> enemies = enemyStarts_;
+    if (enemies.empty()) {
+        enemies = ChooseDefaultEnemyStarts();
+    }
+    path.push_back(player);
 
     for (int step = 0; step < maxSteps; ++step) {
         /* ゴールへ着いた時点で、この方策は最後までたどれたので終了です。 */
-        if (position.x == goal_.x && position.y == goal_.y) {
+        if (player.x == goal_.x && player.y == goal_.y) {
             break;
         }
 
-        /* 以前と同じマスへ戻ったら、その後も同じ循環に入るだけなので打ち切ります。 */
-        const int state = StateIndex(position);
-        if (visited[state]) {
+        /* 以前と同じ共同状態へ戻ったら、その後も同じ循環に入るだけなので打ち切ります。 */
+        const GridPoint primaryEnemy = SelectPrimaryEnemy(player, enemies);
+        std::size_t primaryEnemyIndex = 0;
+        for (; primaryEnemyIndex < enemies.size(); ++primaryEnemyIndex) {
+            if (enemies[primaryEnemyIndex].x == primaryEnemy.x &&
+                enemies[primaryEnemyIndex].y == primaryEnemy.y) {
+                break;
+            }
+        }
+        const int supportMask =
+            enemies.empty()
+                ? 0
+                : BuildEnemySupportMask(player, enemies, primaryEnemyIndex);
+        const int visitedState =
+            JointStateIndex(player, primaryEnemy) * kEnemySupportMaskCount +
+            supportMask;
+        if (visited[visitedState]) {
             break;
         }
-        visited[state] = 1;
+        visited[visitedState] = 1;
 
-        /* そのマスでの最善行動を 1 手だけ試し、次にどこへ進むかを見ます。 */
-        const StepResult result =
-            Simulate(position, GetBestAction(position.x, position.y));
+        /* プレイヤーの最善行動を 1 手だけ試し、最寄り敵込みで次にどこへ進むかを見ます。 */
+        const Action playerAction =
+            GetBestActionForState(playerQ_, JointStateIndex(player, primaryEnemy));
+        const MoveResult playerMove = SimulateMove(player, playerAction, false);
+        const GridPoint playerNext = playerMove.next;
 
         /* 壁などで座標が変わらないなら、方策が前へ進めていないので終了です。 */
-        if (result.next.x == position.x && result.next.y == position.y) {
+        if (playerNext.x == player.x && playerNext.y == player.y) {
             break;
         }
 
-        path.push_back(result.next);
+        path.push_back(playerNext);
+
+        /* プレイヤーが敵のいるマスへ入った時点で捕まるので、経路はここで終わります。 */
+        if (ContainsEnemy(enemies, playerNext)) {
+            break;
+        }
 
         /* 落とし穴で終わる経路も「ここで途切れる方策」として記録して止めます。 */
-        if (GetTile(result.next.x, result.next.y) == Tile::Pit) {
+        if (playerMove.landedTile == Tile::Goal || playerMove.landedTile == Tile::Pit) {
             break;
         }
 
-        position = result.next;
+        /* 全敵も現在の最善行動を 1 手ずつ進め、誰かが捕捉できたらその場で終了します。 */
+        std::vector<GridPoint> nextEnemies = enemies;
+        bool caught = false;
+        for (std::size_t enemyIndex = 0; enemyIndex < enemies.size(); ++enemyIndex) {
+            const GridPoint enemyState = enemies[enemyIndex];
+            const int enemySupportMask =
+                BuildEnemySupportMask(playerNext, enemies, enemyIndex);
+            const Action enemyAction =
+                GetBestActionForState(
+                    enemyQ_,
+                    EnemyStateIndex(playerNext, enemyState, enemySupportMask));
+
+            std::vector<GridPoint> occupiedEnemies = nextEnemies;
+            occupiedEnemies.erase(occupiedEnemies.begin() + static_cast<std::ptrdiff_t>(enemyIndex));
+            const MoveResult enemyMove =
+                SimulateEnemyMove(enemyState, enemyAction, occupiedEnemies);
+            nextEnemies[enemyIndex] = enemyMove.next;
+
+            if (enemyMove.next.x == playerNext.x && enemyMove.next.y == playerNext.y) {
+                caught = true;
+                break;
+            }
+        }
+        if (caught) {
+            break;
+        }
+
+        player = playerNext;
+        enemies = std::move(nextEnemies);
     }
 
     return path;
@@ -359,13 +427,29 @@ std::vector<GridPoint> QLearningGrid::BuildGreedyPath(int maxSteps) const {
 // マップ内部補助
 //========================================
 
-int QLearningGrid::StateIndex(const GridPoint& point) const {
+int QLearningGrid::CellIndex(const GridPoint& point) const {
     return point.y * gridWidth_ + point.x;
+}
+
+int QLearningGrid::JointStateIndex(
+    const GridPoint& playerPoint,
+    const GridPoint& enemyPoint) const {
+    const int cellCount = gridWidth_ * gridHeight_;
+    return CellIndex(playerPoint) * cellCount + CellIndex(enemyPoint);
 }
 
 bool QLearningGrid::IsInside(const GridPoint& point) const {
     return point.x >= 0 && point.x < gridWidth_ &&
            point.y >= 0 && point.y < gridHeight_;
+}
+
+bool QLearningGrid::IsEnemyWalkable(const GridPoint& point) const {
+    if (!IsInside(point)) {
+        return false;
+    }
+
+    const Tile tile = GetTile(point.x, point.y);
+    return tile != Tile::Wall && tile != Tile::Pit;
 }
 
 void QLearningGrid::ResetMap() {
@@ -380,27 +464,31 @@ void QLearningGrid::ResetMap() {
     start_ = {0, 0};
     goal_ = {gridWidth_ - 1, gridHeight_ - 1};
     agent_ = start_;
+    enemyStarts_.clear();
+    enemies_.clear();
 
     /* 学習の基準になる開始点、到達点、危険マスをまず固定で置きます。 */
-    tiles_[StateIndex(start_)] = Tile::Start;
-    tiles_[StateIndex(goal_)] = Tile::Goal;
-    tiles_[StateIndex({6, 4})] = Tile::Pit;
-    tiles_[StateIndex({8, 3})] = Tile::Pit;
+    tiles_[CellIndex(start_)] = Tile::Start;
+    tiles_[CellIndex(goal_)] = Tile::Goal;
+    tiles_[CellIndex({6, 4})] = Tile::Pit;
+    tiles_[CellIndex({8, 3})] = Tile::Pit;
 
     /* 左側と右側を分断する縦壁を置き、1 箇所だけ通路を残します。 */
     for (int y = 0; y < gridHeight_; ++y) {
         if (y != 4) {
-            tiles_[StateIndex({3, y})] = Tile::Wall;
+            tiles_[CellIndex({3, y})] = Tile::Wall;
         }
     }
 
     /* 下側にも横壁を足し、回り込みを学ばないと届かない形にします。 */
     for (int x = 5; x <= 8; ++x) {
-        tiles_[StateIndex({x, 6})] = Tile::Wall;
+        tiles_[CellIndex({x, 6})] = Tile::Wall;
     }
 
     /* Goal までの経路距離表も、このマップ配置に合わせて作り直します。 */
     RebuildGoalDistanceMap();
+    enemyStarts_ = ChooseDefaultEnemyStarts();
+    enemies_ = enemyStarts_;
 
     usingLdtkMap_ = false;
     loadedLevelName_ = "BuiltIn";
@@ -424,6 +512,7 @@ void QLearningGrid::ApplyLoadedMap(
     std::vector<Tile> loadedTiles(static_cast<std::size_t>(cellCount), Tile::Empty);
     GridPoint loadedStart = {0, 0};
     GridPoint loadedGoal = {gridWidth - 1, gridHeight - 1};
+    std::vector<GridPoint> loadedEnemyStarts;
 
     bool hasStart = false;
     bool hasGoal = false;
@@ -484,6 +573,15 @@ void QLearningGrid::ApplyLoadedMap(
             loadedTiles[static_cast<std::size_t>(stateIndex)] = Tile::Pit;
         } else if (IsWallIdentifier(identifier)) {
             loadedTiles[static_cast<std::size_t>(stateIndex)] = Tile::Wall;
+        } else if (IsEnemyIdentifier(identifier)) {
+            if (std::find_if(
+                    loadedEnemyStarts.begin(),
+                    loadedEnemyStarts.end(),
+                    [&point](const GridPoint& current) {
+                        return current.x == point.x && current.y == point.y;
+                    }) == loadedEnemyStarts.end()) {
+                loadedEnemyStarts.push_back(point);
+            }
         }
     }
 
@@ -508,12 +606,35 @@ void QLearningGrid::ApplyLoadedMap(
 
     /* 新しい地形へ切り替わったので、Goal までの距離地図も張り直します。 */
     RebuildGoalDistanceMap();
+
+    /* 敵開始位置は LDtk 側の配置を優先し、不正座標は除外したうえで 0 体なら自動配置します。 */
+    enemyStarts_.clear();
+    for (const GridPoint& enemyStart : loadedEnemyStarts) {
+        if (!IsEnemyWalkable(enemyStart) ||
+            (enemyStart.x == start_.x && enemyStart.y == start_.y) ||
+            (enemyStart.x == goal_.x && enemyStart.y == goal_.y)) {
+            continue;
+        }
+
+        enemyStarts_.push_back(enemyStart);
+    }
+
+    if (enemyStarts_.empty()) {
+        enemyStarts_ = ChooseDefaultEnemyStarts();
+    }
+    enemies_ = enemyStarts_;
     loadedLevelName_ = levelIdentifier;
 }
 
 void QLearningGrid::ResetLearningState() {
     /* 以前の学習結果が新しいマップへ混ざらないよう、Q 値と履歴窓を丸ごと消します。 */
-    q_.assign(static_cast<std::size_t>(gridWidth_ * gridHeight_ * kActionCount), 0.0f);
+    const std::size_t cellCount = static_cast<std::size_t>(gridWidth_ * gridHeight_);
+    const std::size_t jointStateCount = cellCount * cellCount;
+    playerQ_.assign(jointStateCount * static_cast<std::size_t>(kActionCount), 0.0f);
+    enemyQ_.assign(
+        jointStateCount * static_cast<std::size_t>(kEnemySupportMaskCount) *
+            static_cast<std::size_t>(kActionCount),
+        0.0f);
     rewardWindow_.fill(0.0f);
     successWindow_.fill(0.0f);
 
@@ -541,14 +662,14 @@ void QLearningGrid::RebuildGoalDistanceMap() {
     }
 
     std::queue<GridPoint> frontier;
-    goalDistance_[static_cast<std::size_t>(StateIndex(goal_))] = 0;
+    goalDistance_[static_cast<std::size_t>(CellIndex(goal_))] = 0;
     frontier.push(goal_);
 
     while (!frontier.empty()) {
         const GridPoint current = frontier.front();
         frontier.pop();
 
-        const int currentDistance = goalDistance_[static_cast<std::size_t>(StateIndex(current))];
+        const int currentDistance = goalDistance_[static_cast<std::size_t>(CellIndex(current))];
         const std::array<GridPoint, 4> neighbors = {
             GridPoint{current.x + 1, current.y},
             GridPoint{current.x - 1, current.y},
@@ -566,7 +687,7 @@ void QLearningGrid::RebuildGoalDistanceMap() {
                 continue;
             }
 
-            const int nextIndex = StateIndex(next);
+            const int nextIndex = CellIndex(next);
             if (goalDistance_[static_cast<std::size_t>(nextIndex)] >= 0) {
                 continue;
             }
@@ -577,11 +698,252 @@ void QLearningGrid::RebuildGoalDistanceMap() {
     }
 }
 
+std::vector<GridPoint> QLearningGrid::ChooseDefaultEnemyStarts() const {
+    /* まず Start から Goal への代表最短経路を 1 本復元し、その中腹付近へ複数候補を置きます。 */
+    std::vector<GridPoint> shortestPath;
+    if (GoalDistance(start_) >= 0) {
+        GridPoint current = start_;
+        shortestPath.push_back(current);
+
+        for (int step = 0; step < gridWidth_ * gridHeight_; ++step) {
+            if (current.x == goal_.x && current.y == goal_.y) {
+                break;
+            }
+
+            const int currentDistance = GoalDistance(current);
+            if (currentDistance <= 0) {
+                break;
+            }
+
+            const std::array<GridPoint, 4> neighbors = {
+                GridPoint{current.x + 1, current.y},
+                GridPoint{current.x, current.y + 1},
+                GridPoint{current.x - 1, current.y},
+                GridPoint{current.x, current.y - 1},
+            };
+
+            bool foundNext = false;
+            for (const GridPoint& next : neighbors) {
+                if (!IsEnemyWalkable(next)) {
+                    continue;
+                }
+
+                if (GoalDistance(next) == currentDistance - 1) {
+                    shortestPath.push_back(next);
+                    current = next;
+                    foundNext = true;
+                    break;
+                }
+            }
+
+            if (!foundNext) {
+                break;
+            }
+        }
+    }
+
+    std::vector<GridPoint> candidates;
+    if (shortestPath.size() >= 3) {
+        const std::array<float, 3> anchors = {0.35f, 0.55f, 0.75f};
+        for (float anchor : anchors) {
+            const int index = static_cast<int>(
+                std::lround((static_cast<float>(shortestPath.size() - 1)) * anchor));
+            if (index <= 0 || index >= static_cast<int>(shortestPath.size()) - 1) {
+                continue;
+            }
+
+            const GridPoint candidate = shortestPath[static_cast<std::size_t>(index)];
+            if (!(candidate.x == start_.x && candidate.y == start_.y) &&
+                !(candidate.x == goal_.x && candidate.y == goal_.y) &&
+                IsEnemyWalkable(candidate) &&
+                !ContainsEnemy(candidates, candidate)) {
+                candidates.push_back(candidate);
+            }
+        }
+    }
+
+    /* 代表経路が短い場合は、中央寄りの通常マスから追加候補を埋めます。 */
+    for (int y = 0; y < gridHeight_; ++y) {
+        for (int x = 0; x < gridWidth_; ++x) {
+            if (static_cast<int>(candidates.size()) >= 3) {
+                break;
+            }
+
+            const GridPoint candidate{x, y};
+            if (!IsEnemyWalkable(candidate) ||
+                (candidate.x == start_.x && candidate.y == start_.y) ||
+                (candidate.x == goal_.x && candidate.y == goal_.y) ||
+                ContainsEnemy(candidates, candidate)) {
+                continue;
+            }
+
+            const int centerDistance =
+                std::abs(x * 2 - (gridWidth_ - 1)) +
+                std::abs(y * 2 - (gridHeight_ - 1));
+            if (centerDistance <= std::max(4, (gridWidth_ + gridHeight_) / 6)) {
+                candidates.push_back(candidate);
+            }
+        }
+        if (static_cast<int>(candidates.size()) >= 3) {
+            break;
+        }
+    }
+
+    if (candidates.empty()) {
+        for (int y = 0; y < gridHeight_; ++y) {
+            for (int x = 0; x < gridWidth_; ++x) {
+                const GridPoint candidate{x, y};
+                if (IsEnemyWalkable(candidate) &&
+                    !(candidate.x == start_.x && candidate.y == start_.y) &&
+                    !(candidate.x == goal_.x && candidate.y == goal_.y)) {
+                    candidates.push_back(candidate);
+                    return candidates;
+                }
+            }
+        }
+    }
+
+    return candidates;
+}
+
+GridPoint QLearningGrid::SelectPrimaryEnemy(
+    const GridPoint& playerPoint,
+    const std::vector<GridPoint>& enemies) const {
+    if (enemies.empty()) {
+        return start_;
+    }
+
+    GridPoint bestEnemy = enemies.front();
+    int bestDistance =
+        std::abs(bestEnemy.x - playerPoint.x) +
+        std::abs(bestEnemy.y - playerPoint.y);
+    for (const GridPoint& enemy : enemies) {
+        const int distance =
+            std::abs(enemy.x - playerPoint.x) +
+            std::abs(enemy.y - playerPoint.y);
+        if (distance < bestDistance ||
+            (distance == bestDistance &&
+             (enemy.y < bestEnemy.y ||
+              (enemy.y == bestEnemy.y && enemy.x < bestEnemy.x)))) {
+            bestEnemy = enemy;
+            bestDistance = distance;
+        }
+    }
+    return bestEnemy;
+}
+
+bool QLearningGrid::ContainsEnemy(
+    const std::vector<GridPoint>& enemies,
+    const GridPoint& point) const {
+    return std::any_of(
+        enemies.begin(),
+        enemies.end(),
+        [&point](const GridPoint& enemy) {
+            return enemy.x == point.x && enemy.y == point.y;
+        });
+}
+
+int QLearningGrid::EnemyStateIndex(
+    const GridPoint& playerPoint,
+    const GridPoint& enemyPoint,
+    int supportMask) const {
+    return JointStateIndex(playerPoint, enemyPoint) * kEnemySupportMaskCount +
+           supportMask;
+}
+
+int QLearningGrid::BuildEnemySupportMask(
+    const GridPoint& playerPoint,
+    const std::vector<GridPoint>& enemies,
+    std::size_t ignoredEnemyIndex) const {
+    /* 他の敵がプレイヤーの隣接 4 マスを押さえていれば、その方向ビットを立てます。 */
+    int mask = 0;
+    for (std::size_t enemyIndex = 0; enemyIndex < enemies.size(); ++enemyIndex) {
+        if (enemyIndex == ignoredEnemyIndex) {
+            continue;
+        }
+
+        const GridPoint& enemy = enemies[enemyIndex];
+        if (enemy.x == playerPoint.x && enemy.y == playerPoint.y - 1) {
+            mask |= (1 << static_cast<int>(Action::Up));
+        } else if (enemy.x == playerPoint.x + 1 && enemy.y == playerPoint.y) {
+            mask |= (1 << static_cast<int>(Action::Right));
+        } else if (enemy.x == playerPoint.x && enemy.y == playerPoint.y + 1) {
+            mask |= (1 << static_cast<int>(Action::Down));
+        } else if (enemy.x == playerPoint.x - 1 && enemy.y == playerPoint.y) {
+            mask |= (1 << static_cast<int>(Action::Left));
+        }
+    }
+
+    return mask;
+}
+
+int QLearningGrid::CountPlayerEscapeRoutes(
+    const GridPoint& playerPoint,
+    const std::vector<GridPoint>& enemies) const {
+    /* 落とし穴は実質的な逃げ道ではないので除外し、安全に抜けられる方向だけ数えます。 */
+    int routeCount = 0;
+    for (int actionIndex = 0; actionIndex < kActionCount; ++actionIndex) {
+        const MoveResult move =
+            SimulateMove(playerPoint, static_cast<Action>(actionIndex), true);
+        if (!move.blocked && !ContainsEnemy(enemies, move.next)) {
+            ++routeCount;
+        }
+    }
+    return routeCount;
+}
+
+int QLearningGrid::CountAdjacentEnemyCoverage(
+    const GridPoint& playerPoint,
+    const std::vector<GridPoint>& enemies) const {
+    int mask = BuildEnemySupportMask(playerPoint, enemies, enemies.size());
+    int coveredCount = 0;
+
+    /* 4 ビットを数え上げて、プレイヤー周囲が何方向ふさがっているかへ変換します。 */
+    for (int bitIndex = 0; bitIndex < kActionCount; ++bitIndex) {
+        if ((mask & (1 << bitIndex)) != 0) {
+            ++coveredCount;
+        }
+    }
+    return coveredCount;
+}
+
+int QLearningGrid::EnemyApproachDirection(
+    const GridPoint& playerPoint,
+    const GridPoint& enemyPoint) const {
+    const int dx = enemyPoint.x - playerPoint.x;
+    const int dy = enemyPoint.y - playerPoint.y;
+
+    /* 差が大きい軸を主方向とみなし、その側面から接近していると解釈します。 */
+    if (std::abs(dx) >= std::abs(dy)) {
+        return dx >= 0 ? static_cast<int>(Action::Right)
+                       : static_cast<int>(Action::Left);
+    }
+    return dy >= 0 ? static_cast<int>(Action::Down)
+                   : static_cast<int>(Action::Up);
+}
+
+int QLearningGrid::CountEnemyApproachDirections(
+    const GridPoint& playerPoint,
+    const std::vector<GridPoint>& enemies) const {
+    int directionMask = 0;
+    for (const GridPoint& enemy : enemies) {
+        directionMask |= (1 << EnemyApproachDirection(playerPoint, enemy));
+    }
+
+    int directionCount = 0;
+    for (int bitIndex = 0; bitIndex < kActionCount; ++bitIndex) {
+        if ((directionMask & (1 << bitIndex)) != 0) {
+            ++directionCount;
+        }
+    }
+    return directionCount;
+}
+
 int QLearningGrid::GoalDistance(const GridPoint& point) const {
     if (!IsInside(point)) {
         return -1;
     }
-    return goalDistance_[static_cast<std::size_t>(StateIndex(point))];
+    return goalDistance_[static_cast<std::size_t>(CellIndex(point))];
 }
 
 int QLearningGrid::EpisodeStepLimit() const {
@@ -616,13 +978,14 @@ float QLearningGrid::MinimumExplorationRate() const {
 // 行動選択と遷移
 //========================================
 
-float QLearningGrid::MaxQ(const GridPoint& point) const {
-    const int state = StateIndex(point);
+float QLearningGrid::MaxQ(
+    const std::vector<float>& qTable,
+    int stateIndex) const {
     float bestValue = std::numeric_limits<float>::lowest();
 
-    /* そのマスにある 4 行動の Q 値を総当たりし、最大値だけを抜き出します。 */
+    /* その状態添字にぶら下がる 4 行動の Q 値を総当たりし、最大値だけを抜き出します。 */
     for (int actionIndex = 0; actionIndex < kActionCount; ++actionIndex) {
-        bestValue = std::max(bestValue, q_[state * kActionCount + actionIndex]);
+        bestValue = std::max(bestValue, qTable[stateIndex * kActionCount + actionIndex]);
     }
 
     return bestValue;
@@ -634,15 +997,34 @@ Action QLearningGrid::RandomAction() {
     return static_cast<Action>(distribution(rng_));
 }
 
-Action QLearningGrid::SelectGreedyAction(const GridPoint& point) {
-    const int state = StateIndex(point);
+Action QLearningGrid::GetBestActionForState(
+    const std::vector<float>& qTable,
+    int stateIndex) const {
+    float bestValue = std::numeric_limits<float>::lowest();
+    Action bestAction = Action::Up;
+
+    /* 描画や経路確認では乱数を使わず、最初に見つかった最大値を採用します。 */
+    for (int actionIndex = 0; actionIndex < kActionCount; ++actionIndex) {
+        const float qValue = qTable[stateIndex * kActionCount + actionIndex];
+        if (qValue > bestValue) {
+            bestValue = qValue;
+            bestAction = static_cast<Action>(actionIndex);
+        }
+    }
+
+    return bestAction;
+}
+
+Action QLearningGrid::SelectGreedyAction(
+    const std::vector<float>& qTable,
+    int stateIndex) {
     float bestValue = std::numeric_limits<float>::lowest();
     std::array<Action, kActionCount> candidates = {};
     int candidateCount = 0;
 
     /* 4 方向を順番に見て、最大値を更新したら候補を入れ替え、同点なら候補へ追加します。 */
     for (int actionIndex = 0; actionIndex < kActionCount; ++actionIndex) {
-        const float qValue = q_[state * kActionCount + actionIndex];
+        const float qValue = qTable[stateIndex * kActionCount + actionIndex];
         if (qValue > bestValue + 0.0001f) {
             bestValue = qValue;
             candidates[0] = static_cast<Action>(actionIndex);
@@ -657,17 +1039,20 @@ Action QLearningGrid::SelectGreedyAction(const GridPoint& point) {
     return candidates[distribution(rng_)];
 }
 
-Action QLearningGrid::SelectAction(const GridPoint& point) {
+Action QLearningGrid::SelectAction(
+    const std::vector<float>& qTable,
+    int stateIndex) {
     /* epsilon 未満なら探索、それ以外なら現在の最良手を採用する epsilon-greedy です。 */
     if (randomUnit_(rng_) < epsilon_) {
         return RandomAction();
     }
-    return SelectGreedyAction(point);
+    return SelectGreedyAction(qTable, stateIndex);
 }
 
-QLearningGrid::StepResult QLearningGrid::Simulate(
+QLearningGrid::MoveResult QLearningGrid::SimulateMove(
     const GridPoint& point,
-    Action action) const {
+    Action action,
+    bool avoidPit) const {
     GridPoint next = point;
 
     //========================================
@@ -693,18 +1078,41 @@ QLearningGrid::StepResult QLearningGrid::Simulate(
     // 壁判定
     //========================================
 
-    /* 盤外か壁なら移動は成立しないので、座標は据え置きのまま壁ペナルティを適用します。 */
-    if (!IsInside(next) || GetTile(next.x, next.y) == Tile::Wall) {
-        return {point, kWallPenalty, false};
+    /* 盤外か壁なら移動は成立しないので、座標は据え置きのまま blocked 扱いで返します。 */
+    if (!IsInside(next)) {
+        return {point, true, GetTile(point.x, point.y)};
     }
 
-    //========================================
-    // 距離報酬と終端判定
-    //========================================
-
     const Tile tile = GetTile(next.x, next.y);
-    const int previousDistance = GoalDistance(point);
-    const int nextDistance = GoalDistance(next);
+    if (tile == Tile::Wall || (avoidPit && tile == Tile::Pit)) {
+        return {point, true, GetTile(point.x, point.y)};
+    }
+
+    return {next, false, tile};
+}
+
+QLearningGrid::MoveResult QLearningGrid::SimulateEnemyMove(
+    const GridPoint& point,
+    Action action,
+    const std::vector<GridPoint>& occupiedEnemies) const {
+    /* 敵は落とし穴を避けつつ、他の敵が居るマスへは重ならないように移動させます。 */
+    const MoveResult move = SimulateMove(point, action, true);
+    if (move.blocked) {
+        return move;
+    }
+
+    if (ContainsEnemy(occupiedEnemies, move.next)) {
+        return {point, true, GetTile(point.x, point.y)};
+    }
+
+    return move;
+}
+
+float QLearningGrid::PlayerProgressReward(
+    const GridPoint& from,
+    const GridPoint& to) const {
+    const int previousDistance = GoalDistance(from);
+    const int nextDistance = GoalDistance(to);
     float progressReward = 0.0f;
 
     /* 壁回りの遠回りも正しく評価できるよう、実際の最短経路距離の増減で進捗を測ります。 */
@@ -719,27 +1127,41 @@ QLearningGrid::StepResult QLearningGrid::Simulate(
         progressReward = 0.20f;
     }
 
-    /* 終端マスならその専用報酬を返し、そうでなければ通常移動報酬で継続します。 */
-    if (tile == Tile::Goal) {
-        return {next, kGoalReward + progressReward, true};
-    }
-    if (tile == Tile::Pit) {
-        return {next, kPitPenalty + progressReward, true};
-    }
-
-    return {next, kStepReward + progressReward, false};
+    return progressReward;
 }
 
 void QLearningGrid::Step() {
+    struct EnemyTransition {
+        /* どの敵の遷移かを示し、未来状態の組み立て時に同じ個体を追跡します。 */
+        std::size_t enemyIndex = 0;
+
+        /* 行動選択時点での敵位置です。距離差報酬の元になる旧座標として残します。 */
+        GridPoint state = {};
+
+        /* 味方の被覆マスク込みで圧縮した、敵用 Q テーブルの状態添字です。 */
+        int stateIndex = 0;
+
+        /* その状態で選んだ行動です。 */
+        Action action = Action::Up;
+
+        /* 実際に盤面へ適用した結果を保持し、報酬計算へ使います。 */
+        MoveResult move = {};
+    };
+
     //========================================
-    // 行動選択
+    // プレイヤー行動選択
     //========================================
 
-    /* 現在位置を状態とし、そこから 1 手選んで仮想遷移を計算します。 */
-    const GridPoint statePoint = agent_;
-    const int state = StateIndex(statePoint);
-    const Action action = SelectAction(statePoint);
-    const StepResult simulated = Simulate(statePoint, action);
+    /* プレイヤーは「自分の位置 + いま最も近い敵」を代表脅威として 1 手選びます。 */
+    const GridPoint playerState = agent_;
+    const GridPoint primaryEnemyState = SelectPrimaryEnemy(playerState, enemies_);
+    const int playerStateIndex = JointStateIndex(playerState, primaryEnemyState);
+    const Action playerAction = SelectAction(playerQ_, playerStateIndex);
+    const MoveResult playerMove = SimulateMove(playerState, playerAction, false);
+    GridPoint playerNext = playerMove.next;
+    std::vector<GridPoint> nextEnemies = enemies_;
+    std::vector<EnemyTransition> enemyTransitions;
+    enemyTransitions.reserve(enemies_.size());
 
     //========================================
     // ステップ数更新
@@ -749,43 +1171,184 @@ void QLearningGrid::Step() {
     ++totalStepCount_;
 
     //========================================
+    // プレイヤー報酬と終端判定
+    //========================================
+
+    float playerReward = 0.0f;
+    bool done = false;
+    bool success = false;
+    bool enemyCaughtPlayer = false;
+
+    int escapeRoutesBefore = 0;
+    int adjacentCoverageBefore = 0;
+    int approachDirectionsBefore = 0;
+    int escapeRoutesAfter = 0;
+    int adjacentCoverageAfter = 0;
+    int approachDirectionsAfter = 0;
+
+    /* まずプレイヤー自身の移動結果だけを採点し、Goal / Pit / 壁を処理します。 */
+    if (playerMove.blocked) {
+        playerReward = kWallPenalty;
+    } else {
+        playerReward = kStepReward + PlayerProgressReward(playerState, playerNext);
+    }
+
+    /* プレイヤーが敵のいるマスへ突っ込んだ場合は、その場で捕捉扱いです。 */
+    if (ContainsEnemy(enemies_, playerNext)) {
+        playerReward += kCaughtPenalty;
+        done = true;
+    } else if (!playerMove.blocked && playerMove.landedTile == Tile::Goal) {
+        playerReward = kGoalReward + PlayerProgressReward(playerState, playerNext);
+        done = true;
+        success = true;
+    } else if (!playerMove.blocked && playerMove.landedTile == Tile::Pit) {
+        playerReward = kPitPenalty + PlayerProgressReward(playerState, playerNext);
+        done = true;
+    }
+
+    //========================================
+    // 敵行動選択
+    //========================================
+
+    if (!done) {
+        /* 移動前後でプレイヤーの逃げ道がどれだけ減ったかを、連携報酬の基準として残します。 */
+        escapeRoutesBefore = CountPlayerEscapeRoutes(playerNext, enemies_);
+        adjacentCoverageBefore = CountAdjacentEnemyCoverage(playerNext, enemies_);
+        approachDirectionsBefore = CountEnemyApproachDirections(playerNext, enemies_);
+
+        /* 敵はプレイヤー移動後の位置を見て、自分ごとに味方の被覆状況込みで 1 手を選びます。 */
+        for (std::size_t enemyIndex = 0; enemyIndex < enemies_.size(); ++enemyIndex) {
+            const GridPoint enemyState = nextEnemies[enemyIndex];
+            const int supportMask =
+                BuildEnemySupportMask(playerNext, nextEnemies, enemyIndex);
+            const int enemyStateIndex =
+                EnemyStateIndex(playerNext, enemyState, supportMask);
+            const Action enemyAction = SelectAction(enemyQ_, enemyStateIndex);
+
+            std::vector<GridPoint> occupiedEnemies = nextEnemies;
+            occupiedEnemies.erase(occupiedEnemies.begin() + static_cast<std::ptrdiff_t>(enemyIndex));
+
+            const MoveResult enemyMove =
+                SimulateEnemyMove(enemyState, enemyAction, occupiedEnemies);
+            nextEnemies[enemyIndex] = enemyMove.next;
+            enemyTransitions.push_back(
+                {enemyIndex, enemyState, enemyStateIndex, enemyAction, enemyMove});
+
+            /* その敵がプレイヤーを捕まえたら、この時点で敵報酬を上積みして終了です。 */
+            if (enemyMove.next.x == playerNext.x && enemyMove.next.y == playerNext.y) {
+                playerReward += kCaughtPenalty;
+                done = true;
+                enemyCaughtPlayer = true;
+            }
+
+            if (done) {
+                break;
+            }
+        }
+
+        /* 全敵が動いたあとで、逃げ道封鎖と包囲の進み具合をまとめて測ります。 */
+        escapeRoutesAfter = CountPlayerEscapeRoutes(playerNext, nextEnemies);
+        adjacentCoverageAfter = CountAdjacentEnemyCoverage(playerNext, nextEnemies);
+        approachDirectionsAfter = CountEnemyApproachDirections(playerNext, nextEnemies);
+    }
+
+    //========================================
     // タイムアウト補正
     //========================================
 
-    /* 手数上限を超えたら、通常遷移でも強制終了させて追加ペナルティを載せます。 */
-    float reward = simulated.reward;
-    bool done = simulated.done;
+    /* 手数上限を超えたら、そのターン終了時点でプレイヤー失敗 / 敵阻止成功として締めます。 */
     if (!done && episodeSteps_ >= EpisodeStepLimit()) {
-        reward += kTimeoutPenalty;
+        playerReward += kTimeoutPenalty;
         done = true;
+    }
+
+    //========================================
+    // 敵側 Q 学習更新式
+    //========================================
+
+    if (!enemyTransitions.empty()) {
+        /* チーム全体で逃げ道を減らした量、隣接包囲の増加量、方向分散の増加量を共有報酬にします。 */
+        const float sharedSealReward =
+            static_cast<float>(escapeRoutesBefore - escapeRoutesAfter) *
+            kEnemySealEscapeReward;
+        const float sharedAdjacencyReward =
+            static_cast<float>(adjacentCoverageAfter - adjacentCoverageBefore) *
+            kEnemyAdjacencyReward;
+        const float sharedSpreadReward =
+            static_cast<float>(approachDirectionsAfter - approachDirectionsBefore) *
+            kEnemySpreadReward;
+        const bool playerBlockedWithoutCatch = done && !success && !enemyCaughtPlayer;
+
+        for (const EnemyTransition& transition : enemyTransitions) {
+            const int previousDistance =
+                std::abs(transition.state.x - playerNext.x) +
+                std::abs(transition.state.y - playerNext.y);
+            const int nextDistance =
+                std::abs(transition.move.next.x - playerNext.x) +
+                std::abs(transition.move.next.y - playerNext.y);
+
+            /* 個別の接近報酬に加え、チーム全体の包囲成果も各敵へ同じように返します。 */
+            float enemyReward = 0.0f;
+            if (transition.move.blocked) {
+                enemyReward = kEnemyWallPenalty;
+            } else {
+                enemyReward =
+                    kEnemyStepReward +
+                    static_cast<float>(previousDistance - nextDistance) * 0.12f;
+            }
+            enemyReward +=
+                sharedSealReward + sharedAdjacencyReward + sharedSpreadReward;
+
+            if (transition.move.next.x == playerNext.x &&
+                transition.move.next.y == playerNext.y) {
+                enemyReward += kEnemyCatchReward;
+            } else if (success) {
+                enemyReward += kEnemyGoalPenalty;
+            } else if (playerBlockedWithoutCatch) {
+                enemyReward += kEnemyBlockReward;
+            }
+
+            const int futureSupportMask =
+                BuildEnemySupportMask(playerNext, nextEnemies, transition.enemyIndex);
+            const int futureStateIndex = EnemyStateIndex(
+                playerNext,
+                nextEnemies[transition.enemyIndex],
+                futureSupportMask);
+            const float enemyFuture = done ? 0.0f : MaxQ(enemyQ_, futureStateIndex);
+            const int enemyActionIndex = static_cast<int>(transition.action);
+            float& enemyCurrent =
+                enemyQ_[transition.stateIndex * kActionCount + enemyActionIndex];
+            enemyCurrent +=
+                kAlpha * (enemyReward + kGamma * enemyFuture - enemyCurrent);
+        }
     }
 
     //========================================
     // Q 学習更新式
     //========================================
 
-    /* 現在の Q 値を、観測した報酬 + 次状態の最大価値へ少しずつ寄せて更新します。 */
-    const int actionIndex = static_cast<int>(action);
-    const float future = done ? 0.0f : MaxQ(simulated.next);
-    float& current = q_[state * kActionCount + actionIndex];
-    current += kAlpha * (reward + kGamma * future - current);
+    /* プレイヤー側 Q は、自分の行動後に敵群が応答したあとの代表脅威状態へ寄せて更新します。 */
+    const int playerActionIndex = static_cast<int>(playerAction);
+    const GridPoint primaryEnemyNext = SelectPrimaryEnemy(playerNext, nextEnemies);
+    const float playerFuture =
+        done ? 0.0f : MaxQ(playerQ_, JointStateIndex(playerNext, primaryEnemyNext));
+    float& playerCurrent = playerQ_[playerStateIndex * kActionCount + playerActionIndex];
+    playerCurrent += kAlpha * (playerReward + kGamma * playerFuture - playerCurrent);
 
     //========================================
     // 現在状態反映
     //========================================
 
-    /* 仮想遷移の結果を実際の現在位置へ反映し、累積報酬も積み増します。 */
-    agent_ = simulated.next;
-    episodeReward_ += reward;
+    /* 仮想遷移の結果を実際の現在位置へ反映し、プレイヤー累積報酬も積み増します。 */
+    agent_ = playerNext;
+    enemies_ = std::move(nextEnemies);
+    episodeReward_ += playerReward;
 
     //========================================
     // エピソード終了処理
     //========================================
 
     if (done) {
-        /* 終端の理由がゴールかどうかを見て、成功 / 失敗として締めます。 */
-        const bool success =
-            GetTile(simulated.next.x, simulated.next.y) == Tile::Goal;
         FinishEpisode(success);
     }
 }
@@ -842,7 +1405,9 @@ void QLearningGrid::FinishEpisode(bool success) {
                   << epsilon_
                   << " | avg=" << std::setprecision(2) << GetAverageReward()
                   << " | success=" << std::setprecision(2)
-                  << GetRecentSuccessRate();
+                  << GetRecentSuccessRate()
+                  << " | blocked=" << std::setprecision(2)
+                  << GetRecentBlockedRate();
 
         const int greedyPath = MeasureGreedyPathLength();
         if (greedyPath >= 0) {
@@ -858,8 +1423,12 @@ void QLearningGrid::FinishEpisode(bool success) {
 }
 
 void QLearningGrid::ResetEpisode() {
-    /* 次の試行は必ず Start から始めるため、位置・手数・累積報酬を初期化します。 */
+    /* 次の試行は必ず Start と敵開始位置列から始めるため、位置・手数・累積報酬を初期化します。 */
     agent_ = start_;
+    if (enemyStarts_.empty()) {
+        enemyStarts_ = ChooseDefaultEnemyStarts();
+    }
+    enemies_ = enemyStarts_;
     episodeSteps_ = 0;
     episodeReward_ = 0.0f;
 }

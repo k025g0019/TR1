@@ -68,7 +68,7 @@ SceneLayout BuildLayout(float width, float height, int gridWidth, int gridHeight
         layout.panel.left + 18.0f,
         layout.panel.top + 18.0f,
         layout.panel.right - 18.0f,
-        layout.panel.top + 448.0f,
+        layout.panel.top + 430.0f,
     };
     layout.legendCard = {
         layout.panel.left + 18.0f,
@@ -84,12 +84,12 @@ SceneLayout BuildLayout(float width, float height, int gridWidth, int gridHeight
 RectPx MetricBarRect(const SceneLayout& layout, int row) {
     /* ゲージ矩形 */
     // 指標は等間隔に縦へ並べたいので、行番号から上端をずらして同じ形のバーを作ります。
-    const float top = layout.metricsCard.top + 156.0f + static_cast<float>(row) * 60.0f;
+    const float top = layout.metricsCard.top + 138.0f + static_cast<float>(row) * 46.0f;
     return {
         layout.metricsCard.left + 18.0f,
-        top + 22.0f,
+        top + 18.0f,
         layout.metricsCard.right - 18.0f,
-        top + 38.0f,
+        top + 32.0f,
     };
 }
 
@@ -98,9 +98,9 @@ RectPx EpisodeTargetInputRectPx(const SceneLayout& layout) {
     // 入力欄はメトリクスカードの下端へ寄せ、統計表示と操作欄が自然につながるように置きます。
     return {
         layout.metricsCard.left + 18.0f,
-        layout.metricsCard.bottom - 72.0f,
+        layout.metricsCard.bottom - 60.0f,
         layout.metricsCard.right - 18.0f,
-        layout.metricsCard.bottom - 28.0f,
+        layout.metricsCard.bottom - 20.0f,
     };
 }
 
@@ -470,6 +470,43 @@ void AppendGrid(
         }
     }
 
+    /* 敵描画 */
+    // 先に敵群を描いておくと、その上へプレイヤーを重ねたときの視認性が安定します。
+    const float enemyGlowHalfSize = cellSize * 0.25f;
+    const float enemyOuterRadius = cellSize * 0.21f;
+    const float enemyInnerRadius = cellSize * 0.11f;
+    for (const GridPoint& enemy : world.GetEnemies()) {
+        const PointPx enemyCenter = CellCenter(layout, world, enemy.x, enemy.y);
+        AppendQuad(
+            vertices,
+            {
+                enemyCenter.x - enemyGlowHalfSize,
+                enemyCenter.y - enemyGlowHalfSize,
+                enemyCenter.x + enemyGlowHalfSize,
+                enemyCenter.y + enemyGlowHalfSize,
+            },
+            width,
+            height,
+            {0.95f, 0.26f, 0.31f, 0.18f});
+        AppendCross(
+            vertices,
+            enemyCenter.x,
+            enemyCenter.y,
+            enemyOuterRadius,
+            std::max(1.5f, cellSize * 0.05f),
+            width,
+            height,
+            {1.0f, 0.88f, 0.90f, 0.92f});
+        AppendDiamond(
+            vertices,
+            enemyCenter.x,
+            enemyCenter.y,
+            enemyInnerRadius,
+            width,
+            height,
+            {0.78f, 0.08f, 0.12f, 1.0f});
+    }
+
     /* エージェント描画 */
     // 現在位置だけは強調表示して目立たせます。
     const GridPoint agent = world.GetAgent();
@@ -552,8 +589,8 @@ void AppendLegendPanel(
     AppendFrame(vertices, layout.legendCard, 2.0f, width, height, {0.22f, 0.32f, 0.46f, 1.0f});
 
     const float left = layout.legendCard.left + 22.0f;
-    const float top = layout.legendCard.top + 72.0f;
-    const float rowGap = 54.0f;
+    const float top = layout.legendCard.top + 64.0f;
+    const float rowGap = 42.0f;
 
     // 小見出し
     // 凡例のアイコンは盤面と同じ見た目で揃えています。
@@ -564,7 +601,7 @@ void AppendLegendPanel(
             left,
             top + rowGap * static_cast<float>(row),
             left + 54.0f,
-            top + rowGap * static_cast<float>(row) + 36.0f,
+            top + rowGap * static_cast<float>(row) + 34.0f,
         };
         AppendQuad(vertices, swatch, width, height, {0.11f, 0.15f, 0.23f, 1.0f});
         AppendFrame(vertices, swatch, 1.0f, width, height, {0.22f, 0.30f, 0.41f, 1.0f});
@@ -579,27 +616,28 @@ void AppendLegendPanel(
     AppendCross(vertices, left + 27.0f, top + rowGap * 2.0f + 18.0f, 13.0f, 4.0f, width, height, {1.0f, 0.92f, 0.92f, 0.96f});
     AppendDiamond(vertices, left + 27.0f, top + rowGap * 2.0f + 18.0f, 9.0f, width, height, {0.60f, 0.10f, 0.10f, 1.0f});
 
-    AppendQuad(vertices, {left + 10.0f, top + rowGap * 3.0f + 8.0f, left + 44.0f, top + rowGap * 3.0f + 28.0f}, width, height, {0.28f, 0.31f, 0.37f, 1.0f});
+    AppendDiamond(vertices, left + 27.0f, top + rowGap * 3.0f + 18.0f, 14.0f, width, height, {1.0f, 0.94f, 0.72f, 1.0f});
+    AppendDiamond(vertices, left + 27.0f, top + rowGap * 3.0f + 18.0f, 9.0f, width, height, {0.95f, 0.73f, 0.18f, 1.0f});
 
-    AppendDiamond(vertices, left + 27.0f, top + rowGap * 4.0f + 18.0f, 14.0f, width, height, {1.0f, 0.94f, 0.72f, 1.0f});
-    AppendDiamond(vertices, left + 27.0f, top + rowGap * 4.0f + 18.0f, 9.0f, width, height, {0.95f, 0.73f, 0.18f, 1.0f});
+    AppendCross(vertices, left + 27.0f, top + rowGap * 4.0f + 18.0f, 13.0f, 4.0f, width, height, {1.0f, 0.88f, 0.90f, 0.92f});
+    AppendDiamond(vertices, left + 27.0f, top + rowGap * 4.0f + 18.0f, 7.0f, width, height, {0.78f, 0.08f, 0.12f, 1.0f});
 
     /* 経路サンプル */
     // 下部には最善経路ラインの見本も載せています。
     const RectPx routeBox = {
         layout.legendCard.left + 18.0f,
-        layout.legendCard.bottom - 130.0f,
+        layout.legendCard.bottom - 54.0f,
         layout.legendCard.right - 18.0f,
         layout.legendCard.bottom - 18.0f,
     };
     AppendFrame(vertices, routeBox, 1.0f, width, height, {0.22f, 0.30f, 0.41f, 1.0f});
 
-    const PointPx a{routeBox.left + 18.0f, routeBox.bottom - 24.0f};
-    const PointPx b{routeBox.left + 96.0f, routeBox.top + 78.0f};
-    const PointPx c{routeBox.right - 24.0f, routeBox.top + 74.0f};
-    AppendSegment(vertices, a, b, 8.0f, width, height, {0.98f, 0.80f, 0.24f, 0.60f});
-    AppendSegment(vertices, b, c, 8.0f, width, height, {0.98f, 0.80f, 0.24f, 0.60f});
-    AppendArrow(vertices, b.x, b.y, 12.0f, Action::Right, width, height, {0.03f, 0.05f, 0.09f, 0.95f});
+    const PointPx a{routeBox.left + 16.0f, routeBox.bottom - 11.0f};
+    const PointPx b{routeBox.left + 82.0f, routeBox.top + 16.0f};
+    const PointPx c{routeBox.right - 20.0f, routeBox.top + 15.0f};
+    AppendSegment(vertices, a, b, 6.0f, width, height, {0.98f, 0.80f, 0.24f, 0.60f});
+    AppendSegment(vertices, b, c, 6.0f, width, height, {0.98f, 0.80f, 0.24f, 0.60f});
+    AppendArrow(vertices, b.x, b.y, 9.0f, Action::Right, width, height, {0.03f, 0.05f, 0.09f, 0.95f});
 }
 
 //==================================
@@ -780,9 +818,9 @@ void AppendTextBitmapGeometry(
     const std::wstring inputText = usePlaceholder ? L"50" : FormatEpisodeTargetInput(episodeRunUiState);
 
     DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.top + 18.0f), L"学習状況", RGB(245, 250, 255), titleFont);
-    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.top + 58.0f), L"エピソード : " + std::to_wstring(world.GetEpisodeCount()), RGB(255, 247, 210), bodyFont);
-    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.top + 86.0f), L"総学習ステップ : " + std::to_wstring(world.GetTrainingStepCount()), RGB(255, 247, 210), bodyFont);
-    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.top + 114.0f), L"現在速度 : " + std::wstring(paused ? L"一時停止" : speedLabel), RGB(255, 247, 210), bodyFont);
+    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.top + 52.0f), L"エピソード : " + std::to_wstring(world.GetEpisodeCount()), RGB(255, 247, 210), bodyFont);
+    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.top + 80.0f), L"総学習ステップ : " + std::to_wstring(world.GetTrainingStepCount()), RGB(255, 247, 210), bodyFont);
+    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.top + 108.0f), L"現在速度 : " + std::wstring(paused ? L"一時停止" : speedLabel), RGB(255, 247, 210), bodyFont);
 
     const std::array<std::wstring, 4> labels = {
         L"ランダム行動率",
@@ -800,7 +838,7 @@ void AppendTextBitmapGeometry(
     // 小見出し
     // 4 本のメトリクス名と値を縦に並べます。
     for (int row = 0; row < 4; ++row) {
-        const float baseY = layout.metricsCard.top + 156.0f + static_cast<float>(row) * 60.0f;
+        const float baseY = layout.metricsCard.top + 138.0f + static_cast<float>(row) * 46.0f;
         DrawTextLine(
             memoryDc,
             localX(layout.metricsCard.left + 18.0f),
@@ -810,15 +848,15 @@ void AppendTextBitmapGeometry(
             bodyFont);
     }
 
-    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.bottom - 108.0f), L"目標エピソード", RGB(255, 247, 210), bodyFont);
+    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.bottom - 88.0f), L"目標エピソード", RGB(255, 247, 210), bodyFont);
     DrawFlatTextLine(
         memoryDc,
         localX(inputRect.left + 14.0f),
-        localY(inputRect.top + 9.0f),
+        localY(inputRect.top + 7.0f),
         inputText,
         usePlaceholder ? RGB(120, 126, 138) : RGB(28, 31, 38),
         bodyFont);
-    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.bottom - 18.0f), FormatEpisodeTargetStatus(episodeRunUiState), RGB(215, 229, 246), smallFont);
+    DrawTextLine(memoryDc, localX(layout.metricsCard.left + 18.0f), localY(layout.metricsCard.bottom - 16.0f), FormatEpisodeTargetStatus(episodeRunUiState), RGB(215, 229, 246), smallFont);
 
     DrawTextLine(memoryDc, localX(layout.legendCard.left + 18.0f), localY(layout.legendCard.top + 18.0f), L"見方と操作", RGB(245, 250, 255), titleFont);
 
@@ -826,35 +864,35 @@ void AppendTextBitmapGeometry(
         L"開始地点",
         L"ゴール",
         L"落とし穴",
-        L"壁",
-        L"エージェント",
+        L"プレイヤー",
+        L"敵 AI",
     };
     const float legendTextX = layout.legendCard.left + 94.0f;
-    const float legendTop = layout.legendCard.top + 82.0f;
+    const float legendTop = layout.legendCard.top + 74.0f;
     // 小見出し
     // 凡例ラベルも縦方向に等間隔で並べます。
     for (int row = 0; row < 5; ++row) {
         DrawTextLine(
             memoryDc,
             localX(legendTextX),
-            localY(legendTop + static_cast<float>(row) * 54.0f),
+            localY(legendTop + static_cast<float>(row) * 42.0f),
             legendLabels[row],
             RGB(220, 232, 248),
             bodyFont);
     }
 
-    RECT infoRect = {
-        localX(layout.legendCard.left + 18.0f),
-        localY(layout.legendCard.bottom - 118.0f),
-        localX(layout.legendCard.right - 18.0f),
-        localY(layout.legendCard.bottom - 18.0f),
-    };
-    DrawWrappedText(
+    DrawTextLine(
         memoryDc,
-        infoRect,
-        L"黄色の線は現在の最良経路です。明るいマスほど価値が高いことを表します。\n\n"
-        L"操作 : 1 ゆっくり / 2 ふつう / 3 はやい / 4 最速 / Space 一時停止 / "
-        L"N 1歩進める / 白い欄をクリックして数字入力 / Enter 目標まで実行 / Esc 終了",
+        localX(layout.legendCard.left + 18.0f),
+        localY(layout.legendCard.bottom - 104.0f),
+        L"黄色線 : 現在の最良経路 / 赤印 : 敵 AI",
+        RGB(215, 229, 246),
+        smallFont);
+    DrawTextLine(
+        memoryDc,
+        localX(layout.legendCard.left + 18.0f),
+        localY(layout.legendCard.bottom - 80.0f),
+        L"操作 : 1-4 速度 / Space 停止 / N 1歩 / Enter 目標 / Esc 終了",
         RGB(215, 229, 246),
         smallFont);
 
@@ -968,7 +1006,8 @@ std::wstring BuildWindowTitle(
            << L" | マップ " << world.GetMapDisplayName()
            << L" | 速度 " << (paused ? L"一時停止" : speedLabel)
            << L" | ランダム " << std::fixed << std::setprecision(2) << world.GetEpsilon()
-           << L" | 成功率 " << std::setprecision(2) << world.GetRecentSuccessRate();
+           << L" | 成功率 " << std::setprecision(2) << world.GetRecentSuccessRate()
+           << L" | 阻止率 " << std::setprecision(2) << world.GetRecentBlockedRate();
 
     const int greedyPath = world.MeasureGreedyPathLength();
     if (greedyPath >= 0) {
