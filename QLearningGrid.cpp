@@ -354,6 +354,9 @@ std::vector<GridPoint> QLearningGrid::BuildGreedyPath(int maxSteps) const {
                 break;
             }
         }
+        /* visited には味方被覆マスクまで含めて保存しないと、
+           同じ位置関係でも「すでに味方が一方向を押さえている状態」と
+           「まだ誰も逃げ道を押さえていない状態」を区別できません。 */
         const int supportMask =
             enemies.empty()
                 ? 0
@@ -629,6 +632,8 @@ void QLearningGrid::ApplyLoadedMap(
 void QLearningGrid::ResetLearningState() {
     /* 以前の学習結果が新しいマップへ混ざらないよう、Q 値と履歴窓を丸ごと消します。 */
     const std::size_t cellCount = static_cast<std::size_t>(gridWidth_ * gridHeight_);
+
+    /* playerQ_ は joint state だけ、enemyQ_ はそこへ support mask を掛けた分だけ広く取ります。 */
     const std::size_t jointStateCount = cellCount * cellCount;
     playerQ_.assign(jointStateCount * static_cast<std::size_t>(kActionCount), 0.0f);
     enemyQ_.assign(
@@ -847,6 +852,7 @@ int QLearningGrid::EnemyStateIndex(
     const GridPoint& playerPoint,
     const GridPoint& enemyPoint,
     int supportMask) const {
+    /* 基本 joint state を 16 倍して、その下位領域へ support mask を差し込みます。 */
     return JointStateIndex(playerPoint, enemyPoint) * kEnemySupportMaskCount +
            supportMask;
 }
@@ -863,6 +869,9 @@ int QLearningGrid::BuildEnemySupportMask(
         }
 
         const GridPoint& enemy = enemies[enemyIndex];
+
+        /* Action の列挙値と同じビット位置へ立てておくと、
+           後で方向数を数える処理とそのまま共有できます。 */
         if (enemy.x == playerPoint.x && enemy.y == playerPoint.y - 1) {
             mask |= (1 << static_cast<int>(Action::Up));
         } else if (enemy.x == playerPoint.x + 1 && enemy.y == playerPoint.y) {
@@ -880,7 +889,7 @@ int QLearningGrid::BuildEnemySupportMask(
 int QLearningGrid::CountPlayerEscapeRoutes(
     const GridPoint& playerPoint,
     const std::vector<GridPoint>& enemies) const {
-    /* 落とし穴は実質的な逃げ道ではないので除外し、安全に抜けられる方向だけ数えます。 */
+    /* 落とし穴は「進めるが生存できない」ので、包囲評価では逃げ道に含めません。 */
     int routeCount = 0;
     for (int actionIndex = 0; actionIndex < kActionCount; ++actionIndex) {
         const MoveResult move =
@@ -913,7 +922,8 @@ int QLearningGrid::EnemyApproachDirection(
     const int dx = enemyPoint.x - playerPoint.x;
     const int dy = enemyPoint.y - playerPoint.y;
 
-    /* 差が大きい軸を主方向とみなし、その側面から接近していると解釈します。 */
+    /* 差が大きい軸を主方向とみなし、その側面から接近していると解釈します。
+       これで右側に団子になった 2 体と、右下から挟む 2 体を別扱いできます。 */
     if (std::abs(dx) >= std::abs(dy)) {
         return dx >= 0 ? static_cast<int>(Action::Right)
                        : static_cast<int>(Action::Left);
@@ -925,6 +935,7 @@ int QLearningGrid::EnemyApproachDirection(
 int QLearningGrid::CountEnemyApproachDirections(
     const GridPoint& playerPoint,
     const std::vector<GridPoint>& enemies) const {
+    /* 4 方向ビットへまとめてから数えると、重複方向を自然に 1 回へ畳めます。 */
     int directionMask = 0;
     for (const GridPoint& enemy : enemies) {
         directionMask |= (1 << EnemyApproachDirection(playerPoint, enemy));
@@ -983,7 +994,8 @@ float QLearningGrid::MaxQ(
     int stateIndex) const {
     float bestValue = std::numeric_limits<float>::lowest();
 
-    /* その状態添字にぶら下がる 4 行動の Q 値を総当たりし、最大値だけを抜き出します。 */
+    /* その状態添字にぶら下がる 4 行動の Q 値を総当たりし、最大値だけを抜き出します。
+       stateIndex は呼び出し側で前計算しているので、ここでは配列読取りだけに集中します。 */
     for (int actionIndex = 0; actionIndex < kActionCount; ++actionIndex) {
         bestValue = std::max(bestValue, qTable[stateIndex * kActionCount + actionIndex]);
     }
@@ -1003,7 +1015,8 @@ Action QLearningGrid::GetBestActionForState(
     float bestValue = std::numeric_limits<float>::lowest();
     Action bestAction = Action::Up;
 
-    /* 描画や経路確認では乱数を使わず、最初に見つかった最大値を採用します。 */
+    /* 描画や経路確認では乱数を使わず、最初に見つかった最大値を採用します。
+       これで同じ Q テーブルから毎回同じ見た目の経路や矢印を再現できます。 */
     for (int actionIndex = 0; actionIndex < kActionCount; ++actionIndex) {
         const float qValue = qTable[stateIndex * kActionCount + actionIndex];
         if (qValue > bestValue) {
@@ -1131,6 +1144,8 @@ float QLearningGrid::PlayerProgressReward(
 }
 
 void QLearningGrid::Step() {
+    /* 敵は逐次移動しつつ、Q 更新は「全員の移動後」にまとめたいので、
+       その間の中間情報をローカル構造体へ退避しておきます。 */
     struct EnemyTransition {
         /* どの敵の遷移かを示し、未来状態の組み立て時に同じ個体を追跡します。 */
         std::size_t enemyIndex = 0;
@@ -1179,6 +1194,7 @@ void QLearningGrid::Step() {
     bool success = false;
     bool enemyCaughtPlayer = false;
 
+    /* これらは「チーム全体として包囲がどれだけ進んだか」を測る共有報酬の材料です。 */
     int escapeRoutesBefore = 0;
     int adjacentCoverageBefore = 0;
     int approachDirectionsBefore = 0;
@@ -1216,7 +1232,8 @@ void QLearningGrid::Step() {
         adjacentCoverageBefore = CountAdjacentEnemyCoverage(playerNext, enemies_);
         approachDirectionsBefore = CountEnemyApproachDirections(playerNext, enemies_);
 
-        /* 敵はプレイヤー移動後の位置を見て、自分ごとに味方の被覆状況込みで 1 手を選びます。 */
+        /* 敵はプレイヤー移動後の位置を見て、自分ごとに味方の被覆状況込みで 1 手を選びます。
+           nextEnemies を順に更新するので、後から動く敵ほど先に動いた味方の位置も見られます。 */
         for (std::size_t enemyIndex = 0; enemyIndex < enemies_.size(); ++enemyIndex) {
             const GridPoint enemyState = nextEnemies[enemyIndex];
             const int supportMask =
@@ -1225,6 +1242,7 @@ void QLearningGrid::Step() {
                 EnemyStateIndex(playerNext, enemyState, supportMask);
             const Action enemyAction = SelectAction(enemyQ_, enemyStateIndex);
 
+            /* occupiedEnemies から本人を外しておくと、「他の敵と重なるな」だけを自然に表現できます。 */
             std::vector<GridPoint> occupiedEnemies = nextEnemies;
             occupiedEnemies.erase(occupiedEnemies.begin() + static_cast<std::ptrdiff_t>(enemyIndex));
 
@@ -1246,7 +1264,8 @@ void QLearningGrid::Step() {
             }
         }
 
-        /* 全敵が動いたあとで、逃げ道封鎖と包囲の進み具合をまとめて測ります。 */
+        /* 全敵が動いたあとで、逃げ道封鎖と包囲の進み具合をまとめて測ります。
+           個別更新の前にチーム成果を確定させることで、共有報酬を全員へ同条件で配れます。 */
         escapeRoutesAfter = CountPlayerEscapeRoutes(playerNext, nextEnemies);
         adjacentCoverageAfter = CountAdjacentEnemyCoverage(playerNext, nextEnemies);
         approachDirectionsAfter = CountEnemyApproachDirections(playerNext, nextEnemies);
@@ -1267,7 +1286,8 @@ void QLearningGrid::Step() {
     //========================================
 
     if (!enemyTransitions.empty()) {
-        /* チーム全体で逃げ道を減らした量、隣接包囲の増加量、方向分散の増加量を共有報酬にします。 */
+        /* チーム全体で逃げ道を減らした量、隣接包囲の増加量、方向分散の増加量を共有報酬にします。
+           追跡だけでなく「囲った」「逃げ場を消した」行動も価値として残すための項目です。 */
         const float sharedSealReward =
             static_cast<float>(escapeRoutesBefore - escapeRoutesAfter) *
             kEnemySealEscapeReward;
@@ -1287,7 +1307,8 @@ void QLearningGrid::Step() {
                 std::abs(transition.move.next.x - playerNext.x) +
                 std::abs(transition.move.next.y - playerNext.y);
 
-            /* 個別の接近報酬に加え、チーム全体の包囲成果も各敵へ同じように返します。 */
+            /* 個別の接近報酬に加え、チーム全体の包囲成果も各敵へ同じように返します。
+               これで自分は直接捕まえていなくても、包囲へ貢献した敵が学習できます。 */
             float enemyReward = 0.0f;
             if (transition.move.blocked) {
                 enemyReward = kEnemyWallPenalty;
@@ -1308,6 +1329,7 @@ void QLearningGrid::Step() {
                 enemyReward += kEnemyBlockReward;
             }
 
+            /* futureState も同じ敵番号で組み直し、移動後に味方配置がどう変わったかまで未来価値へ入れます。 */
             const int futureSupportMask =
                 BuildEnemySupportMask(playerNext, nextEnemies, transition.enemyIndex);
             const int futureStateIndex = EnemyStateIndex(

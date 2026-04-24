@@ -161,8 +161,13 @@ private:
     //========================================
 
     struct MoveResult {
+        /* 1 手適用後の着地点です。壁に当たったときは元の座標がそのまま入ります。 */
         GridPoint next;
+
+        /* 盤外 / 壁 / 敵重なりなどで実移動が成立しなかったかを示します。 */
         bool blocked = false;
+
+        /* 進入先マス種別です。Goal / Pit の終了判定や報酬分岐で使います。 */
         Tile landedTile = Tile::Empty;
     };
 
@@ -228,7 +233,7 @@ private:
     /* 敵が同じ側へ団子にならず、別方向へ散るほど少し加点して挟み込みを促します。 */
     static constexpr float kEnemySpreadReward = 0.18f;
 
-    /* プレイヤー周囲 4 方向の被覆状態を表すビットマスクの総数です。 */
+    /* プレイヤー周囲 4 方向の被覆状態を表すビットマスクの総数です。2^4 なので 16 通りあります。 */
     static constexpr int kEnemySupportMaskCount = 16;
 
     //========================================
@@ -290,19 +295,22 @@ private:
         const std::vector<GridPoint>& enemies,
         const GridPoint& point) const;
 
-    /* 敵専用の状態添字として、味方の逃げ道封鎖情報も含めた添字を返します。 */
+    /* 敵専用の状態添字として、味方の逃げ道封鎖情報も含めた添字を返します。
+       これで「プレイヤーと自分の位置が同じでも、味方がどこを押さえているか」で別状態に分けられます。 */
     int EnemyStateIndex(
         const GridPoint& playerPoint,
         const GridPoint& enemyPoint,
         int supportMask) const;
 
-    /* 他の敵がプレイヤー周囲 4 方向のどこを既に押さえているかをビットで返します。 */
+    /* 他の敵がプレイヤー周囲 4 方向のどこを既に押さえているかをビットで返します。
+       ignoredEnemyIndex は「いま行動を決める本人」を除外するために使います。 */
     int BuildEnemySupportMask(
         const GridPoint& playerPoint,
         const std::vector<GridPoint>& enemies,
         std::size_t ignoredEnemyIndex) const;
 
-    /* プレイヤーが今このターンに安全に逃げられる方向数を数えます。 */
+    /* プレイヤーが今このターンに安全に逃げられる方向数を数えます。
+       壁・落とし穴・敵がある方向は、包囲評価では逃げ道として数えません。 */
     int CountPlayerEscapeRoutes(
         const GridPoint& playerPoint,
         const std::vector<GridPoint>& enemies) const;
@@ -331,13 +339,15 @@ private:
     /* 経路未発見の間は探索を止めすぎないよう、状況に応じた探索率下限を返します。 */
     float MinimumExplorationRate() const;
 
-    /* 状態添字 1 つぶんの 4 行動から、指定テーブルの最大 Q 値だけを返します。 */
+    /* 状態添字 1 つぶんの 4 行動から、指定テーブルの最大 Q 値だけを返します。
+       座標の組み立ては呼び出し側で済ませ、ここでは純粋に Q 配列の読取りだけへ絞ります。 */
     float MaxQ(const std::vector<float>& qTable, int stateIndex) const;
 
     /* 探索用に 4 方向から完全ランダムで 1 手を選びます。 */
     Action RandomAction();
 
-    /* 指定テーブルを deterministic に読み、状態添字で最も高い行動を 1 つ返します。 */
+    /* 指定テーブルを deterministic に読み、状態添字で最も高い行動を 1 つ返します。
+       描画用や経路可視化で乱数を入れたくない場面に使います。 */
     Action GetBestActionForState(
         const std::vector<float>& qTable,
         int stateIndex) const;
@@ -386,10 +396,12 @@ private:
     /* 現在マップの各マス種別を 1 次元配列で保持します。 */
     std::vector<Tile> tiles_;
 
-    /* プレイヤー位置 × 敵位置 × 行動の Q 値本体です。 */
+    /* プレイヤー位置 × 代表敵位置 × 行動の Q 値本体です。
+       全敵の完全な組状態は巨大になりすぎるので、プレイヤー側は「最も近い脅威」だけを見ます。 */
     std::vector<float> playerQ_;
 
-    /* 敵位置 × プレイヤー位置 × 味方被覆マスク × 行動の Q 値本体です。 */
+    /* 敵位置 × プレイヤー位置 × 味方被覆マスク × 行動の Q 値本体です。
+       敵側だけは「味方がどの逃げ道を押さえているか」を追加し、連携の学習余地を持たせます。 */
     std::vector<float> enemyQ_;
 
     /* 各マスから Goal までの最短距離で、進捗報酬の地図として使います。 */
@@ -408,7 +420,8 @@ private:
     /* 毎エピソードの開始位置です。ResetEpisode でここへ戻します。 */
     GridPoint start_ = {};
 
-    /* 毎エピソードの敵開始位置列です。マップから読むか、自動配置で決めます。 */
+    /* 毎エピソードの敵開始位置列です。マップから読むか、自動配置で決めます。
+       ResetEpisode のたびにここから enemies_ へ複製して、各試行を同条件で始めます。 */
     std::vector<GridPoint> enemyStarts_;
 
     /* 目標マスです。距離報酬や終了判定の基準として使います。 */
@@ -417,7 +430,8 @@ private:
     /* 現在エピソードでエージェントが立っている座標です。 */
     GridPoint agent_ = {};
 
-    /* 現在エピソードで敵が立っている座標列です。 */
+    /* 現在エピソードで敵が立っている座標列です。
+       連携評価や被覆マスク計算は、毎ターンこの配列全体を見て行います。 */
     std::vector<GridPoint> enemies_;
 
     //========================================
