@@ -31,7 +31,7 @@ Dx12Renderer::Render() で描画する
 ```
 
 ---
-!"C:\Users\shota\Desktop\TR\フローチャート\全体.png"
+
 
 ## 起動と実行ループ
 
