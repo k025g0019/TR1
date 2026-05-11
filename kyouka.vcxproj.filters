@@ -13,6 +13,9 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="READMEfolder">
+      <UniqueIdentifier>{dfa86bcf-25f9-488b-8d60-c8486ec34217}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Application.cpp">
@@ -64,5 +67,28 @@
     <None Include="maps\qlearning_demo.ldtk">
       <Filter>リソース ファイル</Filter>
     </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="..\..\..\..\Users\shota\Desktop\TR\フローチャート\FinishEpisode.png">
+      <Filter>READMEfolder</Filter>
+    </Image>
+    <Image Include="..\..\..\..\Users\shota\Desktop\TR\フローチャート\GetBestAction.png">
+      <Filter>READMEfolder</Filter>
+    </Image>
+    <Image Include="..\..\..\..\Users\shota\Desktop\TR\フローチャート\MeasureGreedyPathLength.png">
+      <Filter>READMEfolder</Filter>
+    </Image>
+    <Image Include="..\..\..\..\Users\shota\Desktop\TR\フローチャート\Simulate.png">
+      <Filter>READMEfolder</Filter>
+    </Image>
+    <Image Include="..\..\..\..\Users\shota\Desktop\TR\フローチャート\step.png">
+      <Filter>READMEfolder</Filter>
+    </Image>
+    <Image Include="..\..\..\..\Users\shota\Desktop\TR\フローチャート\学習基本.png">
+      <Filter>READMEfolder</Filter>
+    </Image>
+    <Image Include="..\..\..\..\Users\shota\Desktop\TR\フローチャート\全体.png">
+      <Filter>READMEfolder</Filter>
+    </Image>
   </ItemGroup>
 </Project>
