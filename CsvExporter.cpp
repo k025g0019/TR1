@@ -65,7 +65,7 @@ std::filesystem::path ExportEpisodeHistoryCsv(
     WriteUtf8Bom(output);
 
     /* 列名行 */
-    output << "エピソード,ランダム率,平均報酬,直近成功率,最良経路長,手数\n";
+    output << "合戦回数,指揮ゆらぎ,平均報酬,味方勝率,残兵差,ターン数\n";
 
     //========================================
     // 本文出力
@@ -83,13 +83,7 @@ std::filesystem::path ExportEpisodeHistoryCsv(
                << FormatFloat(record.averageReward) << ','
                << FormatFloat(record.recentSuccessRate) << ',';
 
-
-        // greedy 経路がまだゴールへ届いていない段階だけ、人が読める文字列へ置き換えます。
-        if (record.bestPathLength >= 0) {
-            output << record.bestPathLength;
-        } else {
-            output << "経路未発見";
-        }
+        output << record.bestPathLength;
 
 
         // 最後にそのエピソードの手数を付けて 1 行を閉じます。

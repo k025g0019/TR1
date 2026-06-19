@@ -241,8 +241,8 @@ void Application::ConfirmEpisodeTargetEdit() {
     if (episodeTargetInput_.empty()) {
         MessageBoxW(
             hwnd_,
-            L"Please enter a target episode.",
-            L"Target Episode",
+            L"目標合戦回数を入力してください。",
+            L"Target Battle",
             MB_OK | MB_ICONWARNING);
         return;
     }
@@ -291,8 +291,8 @@ void Application::ConfirmEpisodeTargetEdit() {
         /* 正の整数以外は受け付けない */
         MessageBoxW(
             hwnd_,
-            L"Please enter a positive integer.",
-            L"Target Episode",
+            L"1 以上の整数を入力してください。",
+            L"Target Battle",
             MB_OK | MB_ICONWARNING);
     }
 }

@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+struct LdtkEntityData;
+
 //========================================
 // QLearningGrid クラス宣言
 //========================================
@@ -76,6 +78,30 @@ public:
 
     /* 現在エピソードで動いている全敵の座標列を返します。 */
     const std::vector<GridPoint>& GetEnemies() const;
+
+    /* 現在の合戦に出ている全ユニットを返します。 */
+    const std::vector<BattleUnit>& GetBattleUnits() const;
+
+    /* 直近の攻撃演出線を返します。 */
+    const std::vector<BattleAttackTrace>& GetBattleAttackTraces() const;
+
+    /* 指定陣営の本部AIが現在出している命令を返します。 */
+    HeadquartersCommand GetHeadquartersCommand(UnitFaction faction) const;
+
+    /* 指定陣営・師団の師団長AIが現在出している命令を返します。 */
+    DivisionCommand GetDivisionCommand(UnitFaction faction, BattleLane lane) const;
+
+    /* 現在残っているプレイヤー側の部隊数を返します。 */
+    int GetPlayerUnitCount() const;
+
+    /* 現在残っている敵側の部隊数を返します。 */
+    int GetEnemyUnitCount() const;
+
+    /* 現在残っているプレイヤー側の総人数を返します。 */
+    int GetPlayerSoldierCount() const;
+
+    /* 現在残っている敵側の総人数を返します。 */
+    int GetEnemySoldierCount() const;
 
     /* 毎エピソードの開始位置として使う Start 座標を返します。 */
     GridPoint GetStart() const;
@@ -164,6 +190,17 @@ private:
         GridPoint next;
         bool blocked = false;
         Tile landedTile = Tile::Empty;
+    };
+
+    struct TacticalDecision {
+        int headquartersState = 0;
+        HeadquartersCommand headquartersCommand = HeadquartersCommand::Balanced;
+        std::array<int, kBattleLaneCount> divisionStates = {};
+        std::array<DivisionCommand, kBattleLaneCount> divisionCommands = {};
+        int ownSoldiersBefore = 0;
+        int enemySoldiersBefore = 0;
+        std::array<int, kBattleLaneCount> ownLaneSoldiersBefore = {};
+        std::array<int, kBattleLaneCount> enemyLaneSoldiersBefore = {};
     };
 
     //========================================
@@ -266,7 +303,7 @@ private:
         int gridWidth,
         int gridHeight,
         const std::vector<int>& intGridCsv,
-        const std::vector<std::pair<std::string, GridPoint>>& entities);
+        const std::vector<LdtkEntityData>& entities);
 
     /* Q テーブル、統計窓、現在エピソードをすべて初期状態へ戻します。 */
     void ResetLearningState();
@@ -373,6 +410,161 @@ private:
     /* エージェントを開始位置へ戻し、手数と累積報酬をリセットします。 */
     void ResetEpisode();
 
+    /* LDtk 識別子から部隊を作り、初期部隊一覧へ追加します。 */
+    void AddInitialBattleUnit(
+        UnitFaction faction,
+        UnitClass unitClass,
+        const GridPoint& position,
+        int count);
+
+    /* 現在の部隊一覧から、旧描画互換の agent_ / enemies_ を更新します。 */
+    void SyncLegacyPositionsFromBattleUnits();
+
+    /* 指定陣営で生存している部隊数を返します。 */
+    int CountActiveBattleUnits(UnitFaction faction) const;
+
+    /* 指定陣営で生存している総人数を返します。 */
+    int CountBattleSoldiers(UnitFaction faction) const;
+
+    /* 1 ターンぶんの部隊移動、攻撃、勝敗判定を進めます。 */
+    void StepBattle();
+
+    /* 指定兵科の移動可能マス数を返します。 */
+    int UnitMoveRange(UnitClass unitClass) const;
+
+    /* 指定兵科の攻撃射程を返します。 */
+    int UnitAttackRange(UnitClass unitClass) const;
+
+    /* 指定兵科の基礎攻撃力を返します。 */
+    int UnitBaseDamage(UnitClass unitClass) const;
+
+    /* 指定兵科の守備補正を返します。 */
+    float UnitDefense(UnitClass unitClass) const;
+
+    /* 兵科相性による攻撃倍率を返します。 */
+    float UnitMatchupMultiplier(UnitClass attackerClass, UnitClass defenderClass) const;
+
+    /* 盤面距離をマンハッタン距離で返します。 */
+    int BattleDistance(const GridPoint& from, const GridPoint& to) const;
+
+    /* 指定マスが部隊移動先として使えるかを返します。 */
+    bool IsBattleWalkable(const GridPoint& point) const;
+
+    /* 指定マスに生存部隊がいるかを返します。 */
+    bool IsBattleOccupied(const GridPoint& point, int ignoredUnitIndex) const;
+
+    /* 目標射程へ近づくための次の 1 マスを BFS で探します。 */
+    GridPoint FindNextBattleStep(
+        int unitIndex,
+        const GridPoint& targetPoint,
+        int attackRange) const;
+
+    /* 部隊を目標へ向けて兵科の移動力ぶん進めます。 */
+    void MoveBattleUnitToward(int unitIndex, const GridPoint& targetPoint);
+
+    /* 弓兵が近接されたとき、可能なら距離を取ります。 */
+    void MoveArcherAwayFromTarget(int unitIndex, const GridPoint& targetPoint);
+
+    /* 攻撃可能なら人数ダメージを適用します。 */
+    bool ResolveBattleAttack(int attackerIndex, int targetIndex);
+
+    /* 攻撃線と被弾演出の残り時間を 1 手ぶん進めます。 */
+    void AdvanceBattleEffects();
+
+    /* 陣営を Q テーブル配列の添字へ変換します。 */
+    int FactionIndex(UnitFaction faction) const;
+
+    /* 座標から左翼・中央・右翼のどこにいるかを返します。 */
+    BattleLane LaneForPoint(const GridPoint& point) const;
+
+    /* 師団列挙を配列添字へ変換します。 */
+    int LaneIndex(BattleLane lane) const;
+
+    /* 初期兵数を基準に、現在兵数を 0..2 の段階へ圧縮します。 */
+    int SoldierRatioBucket(int current, int maximum) const;
+
+    /* 兵力差を 0..2 の優劣段階へ圧縮します。 */
+    int AdvantageBucket(int ownSoldiers, int enemySoldiers) const;
+
+    /* 指定師団にいる指定陣営の総兵数を返します。 */
+    int CountBattleSoldiersInLane(UnitFaction faction, BattleLane lane) const;
+
+    /* 指定陣営の初期総兵数を返します。 */
+    int CountInitialBattleSoldiers(UnitFaction faction) const;
+
+    /* 指定師団にいる指定陣営の初期総兵数を返します。 */
+    int CountInitialBattleSoldiersInLane(UnitFaction faction, BattleLane lane) const;
+
+    /* 敵弓兵が自軍へどれだけ圧をかけているかを 0..2 へ圧縮します。 */
+    int EnemyArcherPressureBucket(UnitFaction faction) const;
+
+    /* 中央師団の支配状況を 0..2 へ圧縮します。 */
+    int CenterControlBucket(UnitFaction faction) const;
+
+    /* 本部AI用の状態添字を作ります。 */
+    int BuildHeadquartersState(UnitFaction faction) const;
+
+    /* 師団長AI用の状態添字を作ります。 */
+    int BuildDivisionState(
+        UnitFaction faction,
+        BattleLane lane,
+        HeadquartersCommand headquartersCommand) const;
+
+    /* 任意行動数の Q テーブルから最大 Q 値を返します。 */
+    float MaxTacticalQ(
+        const std::vector<float>& qTable,
+        int stateIndex,
+        int actionCount) const;
+
+    /* 任意行動数の Q テーブルから epsilon-greedy で行動添字を選びます。 */
+    int SelectTacticalAction(
+        const std::vector<float>& qTable,
+        int stateIndex,
+        int actionCount);
+
+    /* Q 学習の更新式を本部・師団長の両方で使える形にまとめます。 */
+    void UpdateTacticalQ(
+        std::vector<float>& qTable,
+        int stateIndex,
+        int actionIndex,
+        float reward,
+        int nextStateIndex,
+        bool done,
+        int actionCount);
+
+    /* 本部AIと師団長AIの命令を選び、後で学習更新できる形へまとめます。 */
+    TacticalDecision SelectTacticalDecision(UnitFaction faction);
+
+    /* 1 ターンの結果を、本部AIと師団長AIの Q 値へ戻します。 */
+    void UpdateTacticalDecision(
+        UnitFaction faction,
+        const TacticalDecision& decision,
+        bool done,
+        bool ownWin);
+
+    /* 本部命令と師団長命令を踏まえ、部隊が狙う相手を選びます。 */
+    int SelectBattleTargetIndex(
+        int unitIndex,
+        HeadquartersCommand headquartersCommand,
+        DivisionCommand divisionCommand) const;
+
+    /* 指定部隊を安全距離まで目標から遠ざけます。 */
+    void MoveBattleUnitAwayFromTarget(
+        int unitIndex,
+        const GridPoint& targetPoint,
+        int safeDistance);
+
+    /* 騎馬が弓兵を狙うとき側面から接近します。 */
+    void MoveCavalryFlank(
+        int unitIndex,
+        const GridPoint& targetPoint);
+
+    /* 歩兵が近くの弓兵を保護するように動きます。 */
+    void MoveInfantryProtect(
+        int unitIndex,
+        const GridPoint& targetPoint,
+        const std::vector<int>& archerIndices);
+
     //========================================
     // マップと Q テーブル
     //========================================
@@ -419,6 +611,33 @@ private:
 
     /* 現在エピソードで敵が立っている座標列です。 */
     std::vector<GridPoint> enemies_;
+
+    /* エピソード開始時に復元する部隊配置です。 */
+    std::vector<BattleUnit> initialBattleUnits_;
+
+    /* 現在の合戦で動いている部隊配置です。 */
+    std::vector<BattleUnit> battleUnits_;
+
+    /* 直近の攻撃線です。 */
+    std::vector<BattleAttackTrace> battleAttackTraces_;
+
+    /* 部隊 ID を重複させないための採番値です。 */
+    int nextBattleUnitId_ = 1;
+
+    /* 本部AIの Q テーブルです。陣営ごとに同じ状態設計で持ちます。 */
+    std::array<std::vector<float>, 2> headquartersQ_;
+
+    /* 師団長AIの Q テーブルです。左翼・中央・右翼の局所命令を学習します。 */
+    std::array<std::vector<float>, 2> divisionQ_;
+
+    /* 現在ターンで本部AIが出している命令です。 */
+    std::array<HeadquartersCommand, 2> currentHeadquartersCommands_ = {
+        HeadquartersCommand::Balanced,
+        HeadquartersCommand::Balanced,
+    };
+
+    /* 現在ターンで師団長AIが出している命令です。 */
+    std::array<std::array<DivisionCommand, kBattleLaneCount>, 2> currentDivisionCommands_ = {};
 
     //========================================
     // 乱数と探索制御

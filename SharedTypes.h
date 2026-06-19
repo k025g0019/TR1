@@ -53,6 +53,90 @@ enum class Action : int {
     Left = 3,
 };
 
+/* 合戦ユニットがどちらの陣営に属するかを表します。 */
+enum class UnitFaction {
+    Player,
+    Enemy,
+};
+
+/* LDtk に置ける兵科です。兵科ごとに移動力、射程、相性が変わります。 */
+enum class UnitClass {
+    Cavalry,
+    Infantry,
+    Archer,
+};
+
+/* 左翼・中央・右翼の 3 師団です。 */
+enum class BattleLane : int {
+    Left = 0,
+    Center = 1,
+    Right = 2,
+};
+
+constexpr int kBattleLaneCount = 3;
+
+/* 本部AIが全軍へ出す戦略命令です。 */
+enum class HeadquartersCommand : int {
+    Balanced = 0,
+    LeftAttack = 1,
+    CenterAttack = 2,
+    RightAttack = 3,
+    Flank = 4,
+    Retreat = 5,
+};
+
+constexpr int kHeadquartersCommandCount = 6;
+
+/* 師団長AIが担当戦線へ出す戦術命令です。 */
+enum class DivisionCommand : int {
+    Hold = 0,
+    Advance = 1,
+    Support = 2,
+    Flank = 3,
+    Retreat = 4,
+};
+
+constexpr int kDivisionCommandCount = 5;
+
+/* 部隊が何を意図して動いているかを表します。 */
+enum class AIIntent : int {
+    Advance,     // 前進／接近
+    Hold,        // 現在地維持
+    Retreat,     // 退避／後退
+    Flank,       // 側面迂回
+    Support,     // 味方支援
+    HuntArcher,  // 騎馬の弓兵追撃
+    Kite,        // 弓兵の距離維持射撃
+    Protect,     // 歩兵の前衛保護
+};
+
+/* 盤面上に出る部隊 1 つ分です。count がその部隊の現在人数です。 */
+struct BattleUnit {
+    int id = 0;
+    UnitFaction faction = UnitFaction::Player;
+    UnitClass unitClass = UnitClass::Infantry;
+    GridPoint position = {};
+    GridPoint startPosition = {};
+    int count = 0;
+    int maxCount = 0;
+    int hitFlashTimer = 0;
+    int hitShakeTimer = 0;
+    bool hitByPlayer = false;
+    bool active = false;
+    int targetId = -1;          // 現在狙っている部隊のID
+    AIIntent intent = AIIntent::Advance;  // 現在の行動意図
+    int commanderId = -1;      // 所属する将軍のid (-1 = independent)
+    bool isGeneral = false;     // この部隊が将軍か
+};
+
+/* 直近の攻撃演出を描くためのログです。 */
+struct BattleAttackTrace {
+    GridPoint attackerPosition = {};
+    GridPoint targetPosition = {};
+    UnitFaction attackerFaction = UnitFaction::Player;
+    int timer = 0;
+};
+
 //========================================
 // 描画データ
 //========================================
