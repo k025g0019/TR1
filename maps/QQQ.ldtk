@@ -319,22 +319,6 @@
 						},
 						{
 							"__identifier": "Enemy",
-							"__grid": [18,6],
-							"__pivot": [0,0],
-							"__tags": [],
-							"__tile": null,
-							"__smartColor": "#D64545",
-							"iid": "d4ab1830-48b0-11f1-8901-1bcc5c6c508c",
-							"width": 32,
-							"height": 32,
-							"defUid": 12,
-							"px": [576,192],
-							"fieldInstances": [],
-							"__worldX": 576,
-							"__worldY": 192
-						},
-						{
-							"__identifier": "Enemy",
 							"__grid": [0,20],
 							"__pivot": [0,0],
 							"__tags": [],
@@ -348,6 +332,38 @@
 							"fieldInstances": [],
 							"__worldX": 0,
 							"__worldY": 640
+						},
+						{
+							"__identifier": "Enemy",
+							"__grid": [5,17],
+							"__pivot": [0,0],
+							"__tags": [],
+							"__tile": null,
+							"__smartColor": "#D64545",
+							"iid": "5c790de0-48b0-11f1-9d45-bfb3b2ecf000",
+							"width": 32,
+							"height": 32,
+							"defUid": 12,
+							"px": [160,544],
+							"fieldInstances": [],
+							"__worldX": 160,
+							"__worldY": 544
+						},
+						{
+							"__identifier": "Enemy",
+							"__grid": [7,17],
+							"__pivot": [0,0],
+							"__tags": [],
+							"__tile": null,
+							"__smartColor": "#D64545",
+							"iid": "5cadb270-48b0-11f1-9d45-279c245e13ef",
+							"width": 32,
+							"height": 32,
+							"defUid": 12,
+							"px": [224,544],
+							"fieldInstances": [],
+							"__worldX": 224,
+							"__worldY": 544
 						}
 					]
 				},
