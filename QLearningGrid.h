@@ -480,6 +480,42 @@ private:
     /* 師団列挙を配列添字へ変換します。 */
     int LaneIndex(BattleLane lane) const;
 
+    /* 将軍用Q学習の状態次元数です。 */
+    static constexpr int kGeneralBucketCount = 3;
+
+    /* 将軍の状態 = 自兵力比率 3 × 敵対象兵力比率 3 × 距離 3 × 勢力均衡 3 × 将軍Index 2 = 162 */
+    static constexpr int kGeneralStateCount =
+        kGeneralBucketCount * kGeneralBucketCount * kGeneralBucketCount *
+        kGeneralBucketCount * 2;
+
+    /* 将軍が選べる行動数です。 */
+    static constexpr int kGeneralActionCount = 6;
+
+    /* 将軍Qテーブルの状態添字を構築します。 */
+    int BuildGeneralState(
+        int ownSoldiers, int ownMax,
+        int enemySoldiers, int enemyMax,
+        int distance,
+        int generalIndex) const;
+
+    /* epsilon-greedyで将軍の行動を選びます。 */
+    int SelectGeneralAction(int stateIndex, int factionIndex);
+
+    /* Q学習の更新式を将軍用に適用します。 */
+    void UpdateGeneralQ(
+        int factionIndex,
+        int stateIndex,
+        int actionIndex,
+        float reward,
+        int nextStateIndex,
+        bool done);
+
+    /* 将軍が自グループの兵数を集計します。 */
+    int CountGeneralGroupSoldiers(int generalUnitIndex) const;
+
+    /* 将軍配下の兵数を集計します。 */
+    int CountGeneralGroupSoldiersById(int generalId) const;
+
     /* 初期兵数を基準に、現在兵数を 0..2 の段階へ圧縮します。 */
     int SoldierRatioBucket(int current, int maximum) const;
 
@@ -629,6 +665,20 @@ private:
 
     /* 師団長AIの Q テーブルです。左翼・中央・右翼の局所命令を学習します。 */
     std::array<std::vector<float>, 2> divisionQ_;
+
+    /* 将軍AIの Q テーブルです。陣営ごとに1テーブル、全将軍で共有します。 */
+    std::array<std::vector<float>, 2> generalQ_;
+
+    /* 将軍ごとの前ターン状態を保持し、Q更新時に使います。 */
+    struct GeneralQLearningState {
+        int unitIndex = -1;
+        int stateIndex = 0;
+        int actionIndex = 0;
+        int ownSoldiersBefore = 0;
+        int enemyGeneralUnitIndex = -1;
+        int enemySoldiersBefore = 0;
+    };
+    std::vector<GeneralQLearningState> generalQLearningStates_;
 
     /* 現在ターンで本部AIが出している命令です。 */
     std::array<HeadquartersCommand, 2> currentHeadquartersCommands_ = {

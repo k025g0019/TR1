@@ -887,6 +887,13 @@ void QLearningGrid::ResetLearningState() {
             0.0f);
     }
 
+    for (std::vector<float>& qTable : generalQ_) {
+        qTable.assign(
+            static_cast<std::size_t>(kGeneralStateCount) *
+                static_cast<std::size_t>(kGeneralActionCount),
+            0.0f);
+    }
+
     rewardWindow_.fill(0.0f);
     successWindow_.fill(0.0f);
 
@@ -1566,6 +1573,81 @@ int QLearningGrid::AdvantageBucket(int ownSoldiers, int enemySoldiers) const {
     }
 
     return 1;
+}
+
+int QLearningGrid::BuildGeneralState(
+    int ownSoldiers, int ownMax,
+    int enemySoldiers, int enemyMax,
+    int distance,
+    int generalIndex) const {
+    int stateIndex = SoldierRatioBucket(ownSoldiers, ownMax);
+    stateIndex = stateIndex * kGeneralBucketCount +
+                 SoldierRatioBucket(enemySoldiers, enemyMax);
+    stateIndex = stateIndex * kGeneralBucketCount +
+                 AdvantageBucket(ownSoldiers, enemySoldiers);
+    stateIndex = stateIndex * kGeneralBucketCount +
+                 std::min(2, distance / 5);
+    stateIndex = stateIndex * 2 +
+                 std::min(1, generalIndex);
+    return stateIndex;
+}
+
+int QLearningGrid::SelectGeneralAction(int stateIndex, int factionIndex) {
+    if (randomUnit_(rng_) < epsilon_) {
+        std::uniform_int_distribution<int> dist(0, kGeneralActionCount - 1);
+        return dist(rng_);
+    }
+
+    const std::vector<float>& q = generalQ_[static_cast<std::size_t>(factionIndex)];
+    float bestValue = std::numeric_limits<float>::lowest();
+    std::vector<int> candidates;
+    candidates.reserve(static_cast<std::size_t>(kGeneralActionCount));
+
+    for (int ai = 0; ai < kGeneralActionCount; ++ai) {
+        const float v = q[stateIndex * kGeneralActionCount + ai];
+        if (v > bestValue + 0.0001f) {
+            bestValue = v;
+            candidates.clear();
+            candidates.push_back(ai);
+        } else if (std::fabs(v - bestValue) <= 0.0001f) {
+            candidates.push_back(ai);
+        }
+    }
+
+    std::uniform_int_distribution<int> dist(0, static_cast<int>(candidates.size()) - 1);
+    return candidates[static_cast<std::size_t>(dist(rng_))];
+}
+
+void QLearningGrid::UpdateGeneralQ(
+    int factionIndex,
+    int stateIndex,
+    int actionIndex,
+    float reward,
+    int nextStateIndex,
+    bool done) {
+    std::vector<float>& q = generalQ_[static_cast<std::size_t>(factionIndex)];
+    float& current = q[stateIndex * kGeneralActionCount + actionIndex];
+    const float future = done ? 0.0f : MaxTacticalQ(q, nextStateIndex, kGeneralActionCount);
+    constexpr float kAlpha = 0.20f;
+    constexpr float kGamma = 0.90f;
+    current += kAlpha * (reward + kGamma * future - current);
+}
+
+int QLearningGrid::CountGeneralGroupSoldiers(int generalUnitIndex) const {
+    const BattleUnit& gen = battleUnits_[static_cast<std::size_t>(generalUnitIndex)];
+    if (!gen.isGeneral) return gen.count;
+    return CountGeneralGroupSoldiersById(gen.id);
+}
+
+int QLearningGrid::CountGeneralGroupSoldiersById(int generalId) const {
+    int total = 0;
+    for (const BattleUnit& u : battleUnits_) {
+        if (!u.active || u.count <= 0) { continue; }
+        if (u.id == generalId || u.commanderId == generalId) {
+            total += u.count;
+        }
+    }
+    return total;
 }
 
 int QLearningGrid::CountBattleSoldiersInLane(UnitFaction faction, BattleLane lane) const {
@@ -2404,7 +2486,7 @@ void QLearningGrid::StepBattle() {
     ++totalStepCount_;
 
     //========================================
-    // 将軍AI: 将軍グループごとにターゲットを決定
+    // 将軍AI: Q学習で行動選択
     //========================================
 
     struct GeneralPlan {
@@ -2414,87 +2496,160 @@ void QLearningGrid::StepBattle() {
     };
     std::vector<GeneralPlan> plans;
 
-    /* 各陣営の将軍ごとに敵グループを評価して狙う */
+    /* 前ターンの将軍Q学習を更新 (state → nextState) */
+    for (GeneralQLearningState& past : generalQLearningStates_) {
+        const BattleUnit& gen = battleUnits_[static_cast<std::size_t>(past.unitIndex)];
+        if (!gen.active || gen.count <= 0 || !gen.isGeneral) {
+            continue;
+        }
+        const int ownAfter = CountGeneralGroupSoldiers(past.unitIndex);
+        int enemyAfter = past.enemySoldiersBefore; /* fallback */
+        if (past.enemyGeneralUnitIndex >= 0) {
+            const BattleUnit& enemyGen = battleUnits_[static_cast<std::size_t>(past.enemyGeneralUnitIndex)];
+            if (enemyGen.active && enemyGen.count > 0) {
+                enemyAfter = CountGeneralGroupSoldiers(past.enemyGeneralUnitIndex);
+            }
+        }
+        /* 報酬 = 敵減少数 × 0.5 - 自減少数 × 0.7 */
+        const int ownLoss = std::max(0, past.ownSoldiersBefore - ownAfter);
+        const int enemyLoss = std::max(0, past.enemySoldiersBefore - enemyAfter);
+        const float reward = static_cast<float>(enemyLoss) * 0.5f -
+                             static_cast<float>(ownLoss) * 0.7f;
+
+        const int ownMax = CountInitialBattleSoldiers(gen.faction);
+        const int enemyMax = CountInitialBattleSoldiers(
+            gen.faction == UnitFaction::Player ? UnitFaction::Enemy : UnitFaction::Player);
+        /* 将軍Index */
+        int generalIdx = 0;
+        {
+            int idx = 0;
+            for (int gi = 0; gi < static_cast<int>(battleUnits_.size()); ++gi) {
+                const BattleUnit& u = battleUnits_[static_cast<std::size_t>(gi)];
+                if (u.active && u.count > 0 && u.isGeneral && u.faction == gen.faction) {
+                    if (u.id == gen.id) { generalIdx = std::min(1, idx); break; }
+                    ++idx;
+                }
+            }
+        }
+        /* 最寄りの敵将軍までの距離 */
+        int minDist = 999;
+        for (const BattleUnit& u : battleUnits_) {
+            if (!u.active || u.count <= 0 || !u.isGeneral || u.faction == gen.faction) { continue; }
+            minDist = std::min(minDist, BattleDistance(gen.position, u.position));
+        }
+        const int nextState = BuildGeneralState(
+            ownAfter, ownMax, enemyAfter, enemyMax, minDist < 999 ? minDist : 99, generalIdx);
+
+        const int fi = FactionIndex(gen.faction);
+        UpdateGeneralQ(fi, past.stateIndex, past.actionIndex, reward, nextState, false);
+    }
+    generalQLearningStates_.clear();
+
+    /* 各将軍の状態を構築し、Q学習で行動選択 */
+    int generalCount[2] = {0, 0};
     for (int ui = 0; ui < static_cast<int>(battleUnits_.size()); ++ui) {
         const BattleUnit& gen = battleUnits_[static_cast<std::size_t>(ui)];
         if (!gen.active || gen.count <= 0 || !gen.isGeneral) {
             continue;
         }
 
-        GeneralPlan plan;
-        plan.generalUnitIndex = ui;
-        plan.tactic = AIIntent::Advance;
+        const int fi = FactionIndex(gen.faction);
+        const int gi = generalCount[fi]++;  /* 将軍Index */
 
-        /* 自グループの兵数を集計 */
-        int ownGroupSoldiers = gen.count;
-        for (const BattleUnit& u : battleUnits_) {
-            if (!u.active || u.count <= 0) { continue; }
-            if (u.commanderId == gen.id) {
-                ownGroupSoldiers += u.count;
-            }
-        }
+        const int ownSoldiers = CountGeneralGroupSoldiers(ui);
+        const int ownMax = CountInitialBattleSoldiers(gen.faction);
 
-        /* 敵将軍グループを評価 */
-        int bestTargetIndex = -1;
-        float bestScore = std::numeric_limits<float>::max();
+        /* 最寄りの敵将軍を探す */
+        int nearestEnemyGenIndex = -1;
+        int minDist = 999;
+        int enemyGroupSoldiers = 0;
+        int enemyMax = CountInitialBattleSoldiers(
+            gen.faction == UnitFaction::Player ? UnitFaction::Enemy : UnitFaction::Player);
         for (int ti = 0; ti < static_cast<int>(battleUnits_.size()); ++ti) {
             const BattleUnit& enemyGen = battleUnits_[static_cast<std::size_t>(ti)];
             if (!enemyGen.active || enemyGen.count <= 0 || !enemyGen.isGeneral ||
                 enemyGen.faction == gen.faction) {
                 continue;
             }
-
-            /* 敵グループの兵数 */
-            int enemyGroupSoldiers = enemyGen.count;
-            for (const BattleUnit& u : battleUnits_) {
-                if (!u.active || u.count <= 0) { continue; }
-                if (u.commanderId == enemyGen.id) {
-                    enemyGroupSoldiers += u.count;
-                }
-            }
-
-            const int distance = BattleDistance(gen.position, enemyGen.position);
-            const float powerRatio = static_cast<float>(ownGroupSoldiers) /
-                                     static_cast<float>(std::max(1, enemyGroupSoldiers));
-
-            float score = static_cast<float>(distance) * 4.0f;
-            score -= powerRatio * 20.0f;          /* 有利なら積極的 */
-
-            if (powerRatio < 0.5f) {
-                score += 30.0f;                    /* 大幅劣勢は避ける */
-                plan.tactic = AIIntent::Retreat;
-            } else if (powerRatio < 0.8f) {
-                score += 10.0f;
-                plan.tactic = AIIntent::Hold;
-            } else if (powerRatio > 1.5f) {
-                score -= 15.0f;                    /* 優勢なら前進 */
-                plan.tactic = AIIntent::Advance;
-            }
-
-            int cavalryMatch = 0, infantryMatch = 0, archerMatch = 0;
-            for (const BattleUnit& u : battleUnits_) {
-                if (!u.active || u.count <= 0) { continue; }
-                if (u.commanderId != enemyGen.id && u.id != enemyGen.id) { continue; }
-                if (u.unitClass == UnitClass::Cavalry) ++cavalryMatch;
-                else if (u.unitClass == UnitClass::Infantry) ++infantryMatch;
-                else if (u.unitClass == UnitClass::Archer) ++archerMatch;
-            }
-            /* こちらに歩兵が多い＋敵に騎馬が多い → 有利 */
-            if (infantryMatch > 0 && cavalryMatch > infantryMatch) {
-                score -= 12.0f;
-            }
-            /* こちらに弓兵が多い＋敵に歩兵が多い → 有利 */
-            if (archerMatch > 0 && infantryMatch > archerMatch) {
-                score -= 12.0f;
-            }
-
-            if (score < bestScore) {
-                bestScore = score;
-                bestTargetIndex = ti;
+            const int d = BattleDistance(gen.position, enemyGen.position);
+            if (d < minDist) {
+                minDist = d;
+                nearestEnemyGenIndex = ti;
+                enemyGroupSoldiers = CountGeneralGroupSoldiers(ti);
             }
         }
 
-        plan.targetIndex = bestTargetIndex;
+        const int stateIndex = BuildGeneralState(
+            ownSoldiers, ownMax,
+            enemyGroupSoldiers, enemyMax,
+            minDist < 999 ? minDist : 99,
+            gi);
+        const int actionIndex = SelectGeneralAction(stateIndex, fi);
+
+        /* 行動 → ターゲットと戦術へマップ */
+        GeneralPlan plan;
+        plan.generalUnitIndex = ui;
+
+        /* 将軍単位で前ターンQ更新用に退避 */
+        GeneralQLearningState qState;
+        qState.unitIndex = ui;
+        qState.stateIndex = stateIndex;
+        qState.actionIndex = actionIndex;
+        qState.ownSoldiersBefore = ownSoldiers;
+        qState.enemyGeneralUnitIndex = nearestEnemyGenIndex;
+        qState.enemySoldiersBefore = enemyGroupSoldiers;
+        generalQLearningStates_.push_back(qState);
+
+        switch (actionIndex) {
+        case 0: /* Advance: 最寄りの敵将軍を狙う */
+            plan.targetIndex = nearestEnemyGenIndex;
+            plan.tactic = AIIntent::Advance;
+            break;
+        case 1: /* Hold: 現在位置維持 */
+            plan.targetIndex = nearestEnemyGenIndex;
+            plan.tactic = AIIntent::Hold;
+            break;
+        case 2: /* Retreat: 後退 */
+            plan.targetIndex = nearestEnemyGenIndex;
+            plan.tactic = AIIntent::Retreat;
+            break;
+        case 3: /* Flank: 敵将軍の近くの弓兵を狙う */
+            plan.targetIndex = nearestEnemyGenIndex;
+            plan.tactic = AIIntent::Flank;
+            break;
+        case 4: /* Support: 味方将軍支援（近い味方のターゲットを継承） */
+        {
+            /* 一番近い味方将軍を探す */
+            int nearestAllyGenIdx = -1;
+            int nearestAllyDist = 999;
+            for (int ai = 0; ai < static_cast<int>(battleUnits_.size()); ++ai) {
+                if (ai == ui) { continue; }
+                const BattleUnit& ally = battleUnits_[static_cast<std::size_t>(ai)];
+                if (!ally.active || ally.count <= 0 || !ally.isGeneral ||
+                    ally.faction != gen.faction) {
+                    continue;
+                }
+                const int d = BattleDistance(gen.position, ally.position);
+                if (d < nearestAllyDist) {
+                    nearestAllyDist = d;
+                    nearestAllyGenIdx = ai;
+                }
+            }
+            /* 支援先のターゲットをそのまま使う（plan.targetIndexは後で上書き） */
+            plan.targetIndex = (nearestAllyGenIdx >= 0) ? nearestAllyGenIdx : nearestEnemyGenIndex;
+            plan.tactic = AIIntent::Support;
+            break;
+        }
+        case 5: /* HuntCavalry: 敵騎兵を優先 */
+            plan.targetIndex = nearestEnemyGenIndex;
+            plan.tactic = AIIntent::HuntArcher;
+            break;
+        default:
+            plan.targetIndex = nearestEnemyGenIndex;
+            plan.tactic = AIIntent::Advance;
+            break;
+        }
+
         plans.push_back(plan);
     }
 
@@ -2773,8 +2928,31 @@ void QLearningGrid::StepBattle() {
     }
 
     //========================================
-    // エピソード終了
+    // エピソード終了: 将軍Q最終更新
     //========================================
+
+    for (GeneralQLearningState& past : generalQLearningStates_) {
+        const BattleUnit& gen = battleUnits_[static_cast<std::size_t>(past.unitIndex)];
+        if (!gen.active || gen.count <= 0 || !gen.isGeneral) { continue; }
+        const int ownAfter = CountGeneralGroupSoldiers(past.unitIndex);
+        int enemyAfter = past.enemySoldiersBefore;
+        if (past.enemyGeneralUnitIndex >= 0) {
+            const BattleUnit& enemyGen = battleUnits_[static_cast<std::size_t>(past.enemyGeneralUnitIndex)];
+            if (enemyGen.active && enemyGen.count > 0) {
+                enemyAfter = CountGeneralGroupSoldiers(past.enemyGeneralUnitIndex);
+            }
+        }
+        const int ownLoss = std::max(0, past.ownSoldiersBefore - ownAfter);
+        const int enemyLoss = std::max(0, past.enemySoldiersBefore - enemyAfter);
+        float reward = static_cast<float>(enemyLoss) * 0.5f - static_cast<float>(ownLoss) * 0.7f;
+        if (done) {
+            const bool genWon = (gen.faction == UnitFaction::Player && playerWin) ||
+                                (gen.faction == UnitFaction::Enemy && !playerWin);
+            reward += genWon ? 30.0f : -30.0f;
+        }
+        UpdateGeneralQ(FactionIndex(gen.faction), past.stateIndex, past.actionIndex, reward, 0, done);
+    }
+    generalQLearningStates_.clear();
 
     SyncLegacyPositionsFromBattleUnits();
 
